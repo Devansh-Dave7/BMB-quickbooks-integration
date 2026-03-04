@@ -16,8 +16,19 @@ router.use(apiKeyAuth);
 router.post('/order', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url } = req.body;
 
+  // Resolve customer name: look up in cache by FullName, then CompanyName, then partial
+  // This handles cases where caller sends company name but QB stores by person name
+  let resolvedCustomerName = customer_name;
+  let customerMatch = null;
+  if (!customer_ref) {
+    customerMatch = cache.getCustomer(customer_name);
+    if (customerMatch) {
+      resolvedCustomerName = customerMatch.full_name || customerMatch.name;
+    }
+  }
+
   const qbxml = templates.buildSalesOrderAdd({
-    customerName: customer_name,
+    customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
     memo: memo || 'Phone order via Sophia AI',
@@ -37,12 +48,20 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     metadata: req.body,
   });
 
-  res.status(202).json({
+  const response = {
     status: 'queued',
     queue_id: queueId,
     message: 'Sales order queued for next QBWC sync',
     estimated_sync: '1-5 minutes',
-  });
+  };
+
+  // Include resolved customer info so caller knows what was matched
+  if (customerMatch && resolvedCustomerName !== customer_name) {
+    response.resolved_customer = resolvedCustomerName;
+    response.original_customer = customer_name;
+  }
+
+  res.status(202).json(response);
 });
 
 // ─── POST /api/invoice — Queue an invoice ───────────────────────
@@ -50,8 +69,18 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
 router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url } = req.body;
 
+  // Resolve customer name (same logic as /order)
+  let resolvedCustomerName = customer_name;
+  let customerMatch = null;
+  if (!customer_ref) {
+    customerMatch = cache.getCustomer(customer_name);
+    if (customerMatch) {
+      resolvedCustomerName = customerMatch.full_name || customerMatch.name;
+    }
+  }
+
   const qbxml = templates.buildInvoiceAdd({
-    customerName: customer_name,
+    customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
     memo: memo || 'Phone order via Sophia AI',
@@ -71,12 +100,19 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     metadata: req.body,
   });
 
-  res.status(202).json({
+  const invoiceResponse = {
     status: 'queued',
     queue_id: queueId,
     message: 'Invoice queued for next QBWC sync',
     estimated_sync: '1-5 minutes',
-  });
+  };
+
+  if (customerMatch && resolvedCustomerName !== customer_name) {
+    invoiceResponse.resolved_customer = resolvedCustomerName;
+    invoiceResponse.original_customer = customer_name;
+  }
+
+  res.status(202).json(invoiceResponse);
 });
 
 // ─── POST /api/query — Queue an ad-hoc QB query ────────────────

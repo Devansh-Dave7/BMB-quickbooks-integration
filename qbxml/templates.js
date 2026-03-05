@@ -284,48 +284,58 @@ function buildItemInventoryAdd(itemData) {
     warnings.push(`Name truncated from "${original}" to "${name}" (QB 31-char limit)`);
   }
 
+  // qbXML elements MUST be in SDK-specified order
   const parts = ['<ItemInventoryAddRq>', '  <ItemInventoryAdd>'];
 
+  // 1. Name (required)
   parts.push(`    <Name>${escXml(name)}</Name>`);
 
-  if (itemData.sku) {
-    parts.push(`    <BarCode>${escXml(itemData.sku)}</BarCode>`);
-  }
-
+  // 2. SalesTaxCodeRef (optional — "Tax" or "Non" for US edition)
   if (itemData.is_taxable != null) {
-    parts.push(`    <IsTaxIncludedInPrice>${itemData.is_taxable ? 'true' : 'false'}</IsTaxIncludedInPrice>`);
+    parts.push('    <SalesTaxCodeRef>');
+    parts.push(`      <FullName>${itemData.is_taxable ? 'Tax' : 'Non'}</FullName>`);
+    parts.push('    </SalesTaxCodeRef>');
   }
 
+  // 3. SalesDesc
   if (itemData.sales_description) {
     parts.push(`    <SalesDesc>${escXml(itemData.sales_description)}</SalesDesc>`);
   }
 
+  // 4. SalesPrice
   parts.push(`    <SalesPrice>${Number(itemData.sales_price).toFixed(2)}</SalesPrice>`);
 
+  // 5. IncomeAccountRef (required)
   parts.push('    <IncomeAccountRef>');
   parts.push(`      <FullName>${escXml(itemData.income_account || 'Sales of Product Income')}</FullName>`);
   parts.push('    </IncomeAccountRef>');
 
+  // 6. PurchaseDesc
   if (itemData.purchase_description) {
     parts.push(`    <PurchaseDesc>${escXml(itemData.purchase_description)}</PurchaseDesc>`);
   }
 
+  // 7. PurchaseCost
   parts.push(`    <PurchaseCost>${Number(itemData.purchase_cost).toFixed(2)}</PurchaseCost>`);
 
+  // 8. COGSAccountRef (required)
   parts.push('    <COGSAccountRef>');
   parts.push(`      <FullName>${escXml(itemData.cogs_account || 'Cost of Goods Sold')}</FullName>`);
   parts.push('    </COGSAccountRef>');
 
+  // 9. AssetAccountRef (required)
   parts.push('    <AssetAccountRef>');
   parts.push(`      <FullName>${escXml(itemData.asset_account || 'Inventory Asset')}</FullName>`);
   parts.push('    </AssetAccountRef>');
 
-  const qty = Number(itemData.quantity_on_hand) || 0;
-  parts.push(`    <QuantityOnHand>${qty}</QuantityOnHand>`);
-
+  // 10. ReorderPoint (optional — must come before QuantityOnHand)
   if (itemData.reorder_point != null) {
     parts.push(`    <ReorderPoint>${Number(itemData.reorder_point)}</ReorderPoint>`);
   }
+
+  // 11. QuantityOnHand
+  const qty = Number(itemData.quantity_on_hand) || 0;
+  parts.push(`    <QuantityOnHand>${qty}</QuantityOnHand>`);
 
   parts.push('  </ItemInventoryAdd>');
   parts.push('</ItemInventoryAddRq>');

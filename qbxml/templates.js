@@ -307,7 +307,7 @@ function buildItemInventoryAdd(itemData) {
 
   // 5. IncomeAccountRef (required)
   parts.push('    <IncomeAccountRef>');
-  parts.push(`      <FullName>${escXml(itemData.income_account || 'Sales of Product Income')}</FullName>`);
+  parts.push(`      <FullName>${escXml(itemData.income_account || 'Construction Income:Materials Income')}</FullName>`);
   parts.push('    </IncomeAccountRef>');
 
   // 6. PurchaseDesc

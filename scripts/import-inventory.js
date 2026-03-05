@@ -76,7 +76,7 @@ const items = inventoryRows.map((r) => {
     sales_price: Number(r['Sales Price / Rate']) || 0,
     purchase_description: r['Purchase Description'] || '',
     purchase_cost: Number(r['Purchase Cost']) || 0,
-    income_account: r['Income Account'] || 'Sales of Product Income',
+    income_account: 'Construction Income:Materials Income',
     cogs_account: r['Expense Account'] || 'Cost of Goods Sold',
     asset_account: r['Inventory Asset Account'] || 'Inventory Asset',
     quantity_on_hand: Number(r['Quantity On Hand']) || 0,

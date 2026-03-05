@@ -14,7 +14,8 @@ router.use(apiKeyAuth);
 // ─── POST /api/order — Queue a sales order ──────────────────────
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
-  const { customer_name, customer_ref, po_number, items, memo, callback_url } = req.body;
+  const { customer_name, customer_ref, po_number, items, memo, callback_url,
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
 
   // Resolve customer name: look up in cache by FullName, then CompanyName, then partial
   // This handles cases where caller sends company name but QB stores by person name
@@ -25,6 +26,26 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     if (customerMatch) {
       resolvedCustomerName = customerMatch.full_name || customerMatch.name;
     }
+  }
+
+  // If new customer, queue a CustomerAdd first (processed before SalesOrderAdd)
+  let customerQueueId = null;
+  if (is_new_customer) {
+    const customerQbxml = templates.buildCustomerAdd({
+      name: resolvedCustomerName,
+      firstName: first_name,
+      lastName: last_name,
+      companyName: company_name,
+      phone: customer_phone,
+      email: customer_email,
+    });
+
+    customerQueueId = queue.addToQueue({
+      type: 'CustomerAdd',
+      qbxml: customerQbxml,
+      priority: queue.PRIORITY.USER_ACTION,
+      metadata: { customer_name: resolvedCustomerName, source: 'auto_create' },
+    });
   }
 
   const qbxml = templates.buildSalesOrderAdd({
@@ -61,13 +82,19 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.original_customer = customer_name;
   }
 
+  if (customerQueueId) {
+    response.auto_customer_queued = true;
+    response.customer_queue_id = customerQueueId;
+  }
+
   res.status(202).json(response);
 });
 
 // ─── POST /api/invoice — Queue an invoice ───────────────────────
 
 router.post('/invoice', validate(validateOrderPayload), (req, res) => {
-  const { customer_name, customer_ref, po_number, items, memo, callback_url } = req.body;
+  const { customer_name, customer_ref, po_number, items, memo, callback_url,
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
 
   // Resolve customer name (same logic as /order)
   let resolvedCustomerName = customer_name;
@@ -77,6 +104,26 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     if (customerMatch) {
       resolvedCustomerName = customerMatch.full_name || customerMatch.name;
     }
+  }
+
+  // If new customer, queue a CustomerAdd first (processed before InvoiceAdd)
+  let customerQueueId = null;
+  if (is_new_customer) {
+    const customerQbxml = templates.buildCustomerAdd({
+      name: resolvedCustomerName,
+      firstName: first_name,
+      lastName: last_name,
+      companyName: company_name,
+      phone: customer_phone,
+      email: customer_email,
+    });
+
+    customerQueueId = queue.addToQueue({
+      type: 'CustomerAdd',
+      qbxml: customerQbxml,
+      priority: queue.PRIORITY.USER_ACTION,
+      metadata: { customer_name: resolvedCustomerName, source: 'auto_create' },
+    });
   }
 
   const qbxml = templates.buildInvoiceAdd({
@@ -110,6 +157,11 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   if (customerMatch && resolvedCustomerName !== customer_name) {
     invoiceResponse.resolved_customer = resolvedCustomerName;
     invoiceResponse.original_customer = customer_name;
+  }
+
+  if (customerQueueId) {
+    invoiceResponse.auto_customer_queued = true;
+    invoiceResponse.customer_queue_id = customerQueueId;
   }
 
   res.status(202).json(invoiceResponse);

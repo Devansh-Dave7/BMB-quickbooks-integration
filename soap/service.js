@@ -310,6 +310,10 @@ async function processResponse(ticket, responseXml, webhookDispatcher) {
         await handleItemInventoryAddRs(responseXml, sentItem, webhookDispatcher);
         break;
 
+      case 'CustomerAddRs':
+        await handleCustomerAddRs(responseXml, sentItem);
+        break;
+
       case 'SalesOrderQueryRs':
       case 'InvoiceQueryRs':
         // Query responses — fire callback if one was set
@@ -570,6 +574,28 @@ async function handleItemInventoryAddRs(xml, sentItem, webhookDispatcher) {
         });
       }
     }
+  }
+}
+
+/**
+ * Handle CustomerAddRs — cache the new customer.
+ * Status 3100 = "name already in use" — not an error, customer exists.
+ */
+async function handleCustomerAddRs(xml, sentItem) {
+  const { status, customer } = await parsers.parseCustomerAddRs(xml);
+
+  if (status.statusCode === 3100) {
+    console.log(`[SOAP] CustomerAdd: customer already exists (3100), continuing`);
+    return;
+  }
+
+  if (status.statusCode !== 0) {
+    throw new Error(`CustomerAdd error [${status.statusCode}]: ${status.statusMessage}`);
+  }
+
+  if (customer) {
+    cache.upsertCustomer(customer);
+    console.log(`[SOAP] Customer created: ${customer.fullName || customer.name} (ListID: ${customer.listId})`);
   }
 }
 

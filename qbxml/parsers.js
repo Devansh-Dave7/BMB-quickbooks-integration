@@ -108,6 +108,44 @@ async function parseCustomerQueryRs(xmlString) {
   return { status, customers };
 }
 
+// ─── Customer Add Response Parser ───────────────────────────────
+
+/**
+ * Parse CustomerAddRs.
+ * Returns { status, customer } with same format as parseCustomerQueryRs items.
+ */
+async function parseCustomerAddRs(xmlString) {
+  const msgs = await parseQBXML(xmlString);
+  const rs = msgs.CustomerAddRs;
+  if (!rs) throw new Error('No CustomerAddRs in response');
+
+  const status = extractStatus(rs);
+  if (status.statusCode !== 0) {
+    return { status, customer: null };
+  }
+
+  const c = rs.CustomerRet;
+  if (!c) return { status, customer: null };
+
+  const customer = {
+    listId: safeGet(c, 'ListID'),
+    name: safeGet(c, 'Name'),
+    fullName: safeGet(c, 'FullName'),
+    companyName: safeGet(c, 'CompanyName'),
+    phone: safeGet(c, 'Phone'),
+    email: safeGet(c, 'Email'),
+    balance: parseFloat(safeGet(c, 'Balance', '0')) || 0,
+    creditLimit: parseFloat(safeGet(c, 'CreditLimit', '0')) || null,
+    terms: c.TermsRef ? safeGet(c.TermsRef, 'FullName') : null,
+    isActive: safeGet(c, 'IsActive') !== 'false',
+    billingAddress: extractAddress(c.BillAddress),
+    shippingAddress: extractAddress(c.ShipAddress),
+    rawData: c,
+  };
+
+  return { status, customer };
+}
+
 // ─── Item Response Parsers ──────────────────────────────────────
 
 /**
@@ -379,6 +417,7 @@ async function detectResponseType(xmlString) {
 module.exports = {
   parseQBXML,
   parseCustomerQueryRs,
+  parseCustomerAddRs,
   parseItemQueryRs,
   parseItemInventoryQueryRs,
   parseItemInventoryAddRs,

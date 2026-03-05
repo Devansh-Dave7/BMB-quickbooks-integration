@@ -43,6 +43,44 @@ function buildCustomerQuery(params = {}) {
   return wrapInEnvelope(parts.join('\n    '));
 }
 
+// ─── Customer Add ───────────────────────────────────────────────
+
+/**
+ * Build a CustomerAddRq.
+ * params.name — required, QB customer Name (max 41 chars)
+ * params.firstName — optional
+ * params.lastName — optional
+ * params.companyName — optional
+ * params.phone — optional
+ * params.email — optional
+ */
+function buildCustomerAdd(params) {
+  const parts = ['<CustomerAddRq>', '  <CustomerAdd>'];
+
+  parts.push(`    <Name>${escXml(params.name)}</Name>`);
+
+  if (params.companyName) {
+    parts.push(`    <CompanyName>${escXml(params.companyName)}</CompanyName>`);
+  }
+  if (params.firstName) {
+    parts.push(`    <FirstName>${escXml(params.firstName)}</FirstName>`);
+  }
+  if (params.lastName) {
+    parts.push(`    <LastName>${escXml(params.lastName)}</LastName>`);
+  }
+  if (params.phone) {
+    parts.push(`    <Phone>${escXml(params.phone)}</Phone>`);
+  }
+  if (params.email) {
+    parts.push(`    <Email>${escXml(params.email)}</Email>`);
+  }
+
+  parts.push('  </CustomerAdd>');
+  parts.push('</CustomerAddRq>');
+
+  return wrapInEnvelope(parts.join('\n    '));
+}
+
 // ─── Item Queries ───────────────────────────────────────────────
 
 /**
@@ -345,6 +383,7 @@ function buildItemInventoryAdd(itemData) {
 
 module.exports = {
   buildCustomerQuery,
+  buildCustomerAdd,
   buildItemQuery,
   buildItemInventoryQuery,
   buildSalesOrderAdd,

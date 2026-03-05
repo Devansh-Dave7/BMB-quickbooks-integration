@@ -38,7 +38,7 @@ app.get('/health', (_req, res) => {
 
 // ─── Start Server & Mount SOAP ──────────────────────────────────
 
-const server = app.listen(config.port, () => {
+const server = app.listen(config.port, '0.0.0.0', () => {
   console.log(`[SERVER] BMB QBWC Server running on port ${config.port}`);
   console.log(`[SERVER] REST API: http://localhost:${config.port}/api/status`);
   console.log(`[SERVER] SOAP/WSDL: http://localhost:${config.port}/qbwc?wsdl`);

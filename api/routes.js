@@ -1,6 +1,6 @@
 const express = require('express');
 const { apiKeyAuth, validate, errorHandler } = require('./middleware');
-const { validateOrderPayload, validateQueryPayload } = require('./validators');
+const { validateOrderPayload, validateQueryPayload, validateInventoryAddPayload } = require('./validators');
 const queue = require('../db/queue');
 const cache = require('../db/cache');
 const log = require('../db/log');
@@ -149,6 +149,47 @@ router.post('/query', validate(validateQueryPayload), (req, res) => {
     message: `${type} queued for next QBWC sync`,
     estimated_sync: '1-5 minutes',
   });
+});
+
+// ─── POST /api/inventory/add — Queue inventory items for QB ─────
+
+router.post('/inventory/add', validate(validateInventoryAddPayload), (req, res) => {
+  const { items, callback_url } = req.body;
+
+  const queueIds = [];
+  const allWarnings = [];
+
+  for (const item of items) {
+    const { qbxml, warnings } = templates.buildItemInventoryAdd(item);
+
+    if (warnings.length > 0) {
+      allWarnings.push({ name: item.name, warnings });
+    }
+
+    const queueId = queue.addToQueue({
+      type: 'ItemInventoryAdd',
+      qbxml,
+      priority: queue.PRIORITY.USER_ACTION,
+      callbackUrl: callback_url,
+      metadata: item,
+    });
+
+    queueIds.push(queueId);
+  }
+
+  const response = {
+    status: 'queued',
+    queue_ids: queueIds,
+    item_count: items.length,
+    message: `${items.length} inventory item(s) queued for next QBWC sync`,
+    estimated_sync: '1-5 minutes',
+  };
+
+  if (allWarnings.length > 0) {
+    response.warnings = allWarnings;
+  }
+
+  res.status(202).json(response);
 });
 
 // ─── GET /api/inventory — Full cached inventory ─────────────────

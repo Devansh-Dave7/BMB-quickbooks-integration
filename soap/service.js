@@ -306,6 +306,10 @@ async function processResponse(ticket, responseXml, webhookDispatcher) {
         await handleInvoiceAddRs(responseXml, sentItem, webhookDispatcher);
         break;
 
+      case 'ItemInventoryAddRs':
+        await handleItemInventoryAddRs(responseXml, sentItem, webhookDispatcher);
+        break;
+
       case 'SalesOrderQueryRs':
       case 'InvoiceQueryRs':
         // Query responses — fire callback if one was set
@@ -525,6 +529,43 @@ async function handleInvoiceAddRs(xml, sentItem, webhookDispatcher) {
           txnNumber: invoice.txnNumber,
           customerName: invoice.customerName,
           total: invoice.total,
+          status: 'created',
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Handle ItemInventoryAddRs — upsert new item into cache, fire webhook.
+ */
+async function handleItemInventoryAddRs(xml, sentItem, webhookDispatcher) {
+  const { status, item } = await parsers.parseItemInventoryAddRs(xml);
+
+  if (status.statusCode !== 0) {
+    throw new Error(`ItemInventoryAdd error [${status.statusCode}]: ${status.statusMessage}`);
+  }
+
+  if (item) {
+    cache.bulkUpsertInventory([item]);
+    console.log(`[SOAP] Inventory item added: ${item.fullName} (ListID: ${item.listId})`);
+
+    if (webhookDispatcher) {
+      webhookDispatcher.fireInventoryUpdated({
+        itemCount: 1,
+        source: 'ItemInventoryAdd',
+        item: { listId: item.listId, name: item.name, fullName: item.fullName },
+        queueId: sentItem ? sentItem.id : null,
+        syncTime: new Date().toISOString(),
+      });
+
+      const callbackUrl = sentItem ? sentItem.callback_url : null;
+      if (callbackUrl) {
+        webhookDispatcher.fireCallback(callbackUrl, {
+          type: 'ItemInventoryAdd',
+          listId: item.listId,
+          name: item.name,
+          fullName: item.fullName,
           status: 'created',
         });
       }

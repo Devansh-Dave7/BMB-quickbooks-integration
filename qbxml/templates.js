@@ -253,6 +253,86 @@ function buildInvoiceQuery(params = {}) {
   return wrapInEnvelope(parts.join('\n    '));
 }
 
+// ─── Inventory Item Add ─────────────────────────────────────────
+
+const QB_NAME_MAX_LENGTH = 31;
+
+/**
+ * Build an ItemInventoryAddRq.
+ * itemData.name — required, item name (truncated to 31 chars for QB)
+ * itemData.sales_description — optional sales description
+ * itemData.sales_price — required, sales price
+ * itemData.income_account — income account (default: "Sales of Product Income")
+ * itemData.purchase_description — optional purchase description
+ * itemData.purchase_cost — required, purchase cost
+ * itemData.cogs_account — COGS account (default: "Cost of Goods Sold")
+ * itemData.asset_account — asset account (default: "Inventory Asset")
+ * itemData.quantity_on_hand — qty on hand (default: 0)
+ * itemData.reorder_point — optional reorder point
+ * itemData.is_taxable — optional boolean
+ * itemData.sku — optional SKU / barcode
+ *
+ * Returns { qbxml, warnings } where warnings contains truncation notices.
+ */
+function buildItemInventoryAdd(itemData) {
+  const warnings = [];
+  let name = String(itemData.name || '').trim();
+
+  if (name.length > QB_NAME_MAX_LENGTH) {
+    const original = name;
+    name = name.substring(0, QB_NAME_MAX_LENGTH);
+    warnings.push(`Name truncated from "${original}" to "${name}" (QB 31-char limit)`);
+  }
+
+  const parts = ['<ItemInventoryAddRq>', '  <ItemInventoryAdd>'];
+
+  parts.push(`    <Name>${escXml(name)}</Name>`);
+
+  if (itemData.sku) {
+    parts.push(`    <BarCode>${escXml(itemData.sku)}</BarCode>`);
+  }
+
+  if (itemData.is_taxable != null) {
+    parts.push(`    <IsTaxIncludedInPrice>${itemData.is_taxable ? 'true' : 'false'}</IsTaxIncludedInPrice>`);
+  }
+
+  if (itemData.sales_description) {
+    parts.push(`    <SalesDesc>${escXml(itemData.sales_description)}</SalesDesc>`);
+  }
+
+  parts.push(`    <SalesPrice>${Number(itemData.sales_price).toFixed(2)}</SalesPrice>`);
+
+  parts.push('    <IncomeAccountRef>');
+  parts.push(`      <FullName>${escXml(itemData.income_account || 'Sales of Product Income')}</FullName>`);
+  parts.push('    </IncomeAccountRef>');
+
+  if (itemData.purchase_description) {
+    parts.push(`    <PurchaseDesc>${escXml(itemData.purchase_description)}</PurchaseDesc>`);
+  }
+
+  parts.push(`    <PurchaseCost>${Number(itemData.purchase_cost).toFixed(2)}</PurchaseCost>`);
+
+  parts.push('    <COGSAccountRef>');
+  parts.push(`      <FullName>${escXml(itemData.cogs_account || 'Cost of Goods Sold')}</FullName>`);
+  parts.push('    </COGSAccountRef>');
+
+  parts.push('    <AssetAccountRef>');
+  parts.push(`      <FullName>${escXml(itemData.asset_account || 'Inventory Asset')}</FullName>`);
+  parts.push('    </AssetAccountRef>');
+
+  const qty = Number(itemData.quantity_on_hand) || 0;
+  parts.push(`    <QuantityOnHand>${qty}</QuantityOnHand>`);
+
+  if (itemData.reorder_point != null) {
+    parts.push(`    <ReorderPoint>${Number(itemData.reorder_point)}</ReorderPoint>`);
+  }
+
+  parts.push('  </ItemInventoryAdd>');
+  parts.push('</ItemInventoryAddRq>');
+
+  return { qbxml: wrapInEnvelope(parts.join('\n    ')), warnings };
+}
+
 module.exports = {
   buildCustomerQuery,
   buildItemQuery,
@@ -261,5 +341,6 @@ module.exports = {
   buildSalesOrderQuery,
   buildInvoiceAdd,
   buildInvoiceQuery,
+  buildItemInventoryAdd,
   escXml,
 };

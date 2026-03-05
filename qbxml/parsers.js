@@ -328,6 +328,29 @@ async function parseInvoiceQueryRs(xmlString) {
   return { status, invoices };
 }
 
+// ─── Item Inventory Add Response Parser ─────────────────────────
+
+/**
+ * Parse ItemInventoryAddRs.
+ * Returns { status, item } with the newly created inventory item.
+ */
+async function parseItemInventoryAddRs(xmlString) {
+  const msgs = await parseQBXML(xmlString);
+  const rs = msgs.ItemInventoryAddRs;
+  if (!rs) throw new Error('No ItemInventoryAddRs in response');
+
+  const status = extractStatus(rs);
+  if (status.statusCode !== 0) {
+    return { status, item: null };
+  }
+
+  const ret = rs.ItemInventoryRet;
+  if (!ret) return { status, item: null };
+
+  const item = parseItemRet(ret, 'Inventory');
+  return { status, item };
+}
+
 // ─── Generic Error Parser ───────────────────────────────────────
 
 /**
@@ -358,6 +381,7 @@ module.exports = {
   parseCustomerQueryRs,
   parseItemQueryRs,
   parseItemInventoryQueryRs,
+  parseItemInventoryAddRs,
   parseSalesOrderAddRs,
   parseSalesOrderQueryRs,
   parseInvoiceAddRs,

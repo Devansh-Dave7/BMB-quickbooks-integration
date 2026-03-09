@@ -26,6 +26,9 @@ app.use(express.urlencoded({ extended: false }));
 getDb();
 console.log('[SERVER] SQLite database initialized');
 
+const { ensurePricingSeeded } = require('./db/pricing');
+ensurePricingSeeded();
+
 // ─── REST API Routes ────────────────────────────────────────────
 
 app.use('/api', apiRoutes);

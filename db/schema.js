@@ -102,6 +102,33 @@ function initTables(db) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Pricing metadata (static product info, joined with inventory_cache for live QB prices)
+    CREATE TABLE IF NOT EXISTS pricing_metadata (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT NOT NULL,
+      qb_item_name TEXT NOT NULL,
+      tonnage REAL,
+      seer2 REAL,
+      tier TEXT,
+      efficiency_tier TEXT,
+      ahri_ref TEXT,
+      outdoor_model TEXT,
+      indoor_model TEXT,
+      outdoor_price REAL,
+      indoor_price REAL,
+      csv_price REAL,
+      condenser_dims TEXT,
+      airhandler_dims TEXT,
+      electrical TEXT,
+      heat_kit_type TEXT,
+      voltage_specs TEXT,
+      warranty_level TEXT,
+      warranty_program TEXT,
+      labor_years INTEGER,
+      parts_years INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
     -- Indexes for common queries
     CREATE INDEX IF NOT EXISTS idx_queue_status_priority
       ON request_queue(status, priority, created_at);
@@ -123,6 +150,15 @@ function initTables(db) {
 
     CREATE INDEX IF NOT EXISTS idx_sync_log_ticket
       ON sync_log(ticket, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_pm_category
+      ON pricing_metadata(category);
+
+    CREATE INDEX IF NOT EXISTS idx_pm_cat_tonnage
+      ON pricing_metadata(category, tonnage);
+
+    CREATE INDEX IF NOT EXISTS idx_pm_qb_name
+      ON pricing_metadata(qb_item_name COLLATE NOCASE);
   `);
 }
 

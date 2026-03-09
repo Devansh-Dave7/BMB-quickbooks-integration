@@ -3,6 +3,7 @@ const { apiKeyAuth, validate, errorHandler } = require('./middleware');
 const { validateOrderPayload, validateQueryPayload, validateInventoryAddPayload } = require('./validators');
 const queue = require('../db/queue');
 const cache = require('../db/cache');
+const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
 
@@ -310,6 +311,32 @@ router.get('/orders', (req, res) => {
     count: orders.length,
     orders,
   });
+});
+
+// ─── GET /api/pricing — List pricing categories ─────────────────
+
+router.get('/pricing', (req, res) => {
+  const categories = pricing.getPricingCategories();
+  res.json({ categories });
+});
+
+// ─── GET /api/pricing/:category — Get items in a category ───────
+
+router.get('/pricing/:category', (req, res) => {
+  const { category } = req.params;
+  const { tonnage, tier } = req.query;
+
+  const validCategories = ['heat_pump', 'ac', 'inverter', 'package_unit', 'heat_kit', 'warranty'];
+  if (!validCategories.includes(category)) {
+    return res.status(400).json({
+      error: `Invalid category: ${category}`,
+      valid_categories: validCategories,
+    });
+  }
+
+  const rows = pricing.getPricingByCategory(category, { tonnage, tier });
+  const response = pricing.formatPricingResponse(rows, category);
+  res.json(response);
 });
 
 // ─── GET /api/status — Server health + sync info ────────────────

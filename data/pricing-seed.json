@@ -1680,7 +1680,7 @@
   },
   {
     "category": "package_unit",
-    "qb_item_name": "2.5T 13.4 S2 Pkg HP-RPHPE-71330P",
+    "qb_item_name": "2.5T 13.4 S2 Pkg HP-RPHPE-71330",
     "tonnage": 2.5,
     "seer2": 13.4,
     "tier": null,
@@ -1726,7 +1726,7 @@
   },
   {
     "category": "package_unit",
-    "qb_item_name": "3.5T 13.4 S2 Pkg HP-RPHPE-71342P",
+    "qb_item_name": "3.5T 13.4 S2 Pkg HP-RPHPE-71342",
     "tonnage": 3.5,
     "seer2": 13.4,
     "tier": null,
@@ -1818,7 +1818,7 @@
   },
   {
     "category": "package_unit",
-    "qb_item_name": "2.5T 13.4 S2 Pkg AC-RPACE-71330P",
+    "qb_item_name": "2.5T 13.4 S2 Pkg AC-RPACE-71330",
     "tonnage": 2.5,
     "seer2": 13.4,
     "tier": null,
@@ -1864,7 +1864,7 @@
   },
   {
     "category": "package_unit",
-    "qb_item_name": "3.5T 13.4 S2 Pkg AC-RPACE-71342P",
+    "qb_item_name": "3.5T 13.4 S2 Pkg AC-RPACE-71342",
     "tonnage": 3.5,
     "seer2": 13.4,
     "tier": null,

@@ -159,6 +159,12 @@ function initTables(db) {
 
     CREATE INDEX IF NOT EXISTS idx_pm_qb_name
       ON pricing_metadata(qb_item_name COLLATE NOCASE);
+
+    CREATE INDEX IF NOT EXISTS idx_pm_outdoor_model
+      ON pricing_metadata(outdoor_model COLLATE NOCASE);
+
+    CREATE INDEX IF NOT EXISTS idx_pm_indoor_model
+      ON pricing_metadata(indoor_model COLLATE NOCASE);
   `);
 }
 

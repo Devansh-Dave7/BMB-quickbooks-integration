@@ -86,18 +86,25 @@ function ensurePricingSeeded() {
 
 /**
  * Get pricing items by category with live QB prices from inventory_cache.
- * LEFT JOIN so items without QB matches still appear (with csv_price fallback).
+ * Double LEFT JOIN: outdoor_model → ic_out, indoor_model → ic_in.
+ * Items without QB matches still appear (with csv_price fallback).
  */
 function getPricingByCategory(category, { tonnage, tier } = {}) {
   const db = getDb();
 
   let sql = `
     SELECT pm.*,
-           ic.sales_price AS qb_price,
-           ic.qty_on_hand,
-           ic.synced_at AS price_updated_at
+           ic_out.sales_price AS qb_outdoor_price,
+           ic_out.qty_on_hand AS outdoor_qty,
+           ic_out.full_name   AS outdoor_full_name,
+           ic_out.synced_at   AS outdoor_synced_at,
+           ic_in.sales_price  AS qb_indoor_price,
+           ic_in.qty_on_hand  AS indoor_qty,
+           ic_in.full_name    AS indoor_full_name,
+           ic_in.synced_at    AS indoor_synced_at
     FROM pricing_metadata pm
-    LEFT JOIN inventory_cache ic ON pm.qb_item_name = ic.name COLLATE NOCASE
+    LEFT JOIN inventory_cache ic_out ON pm.outdoor_model = ic_out.name COLLATE NOCASE
+    LEFT JOIN inventory_cache ic_in  ON pm.indoor_model  = ic_in.name  COLLATE NOCASE
     WHERE pm.category = ?
   `;
   const params = [category];
@@ -133,20 +140,87 @@ function getPricingCategories() {
 }
 
 /**
+ * Determine qb_synced status and effective price for a row based on category.
+ *
+ * | Category              | Synced when                    | Price source              | Stock              |
+ * |-----------------------|--------------------------------|---------------------------|--------------------|
+ * | heat_pump / inverter  | both outdoor + indoor found    | QB outdoor + indoor       | MIN(out, in)       |
+ * | ac                    | never (not in QB)              | csv_price                 | n/a                |
+ * | package_unit (HP)     | outdoor found                  | QB outdoor                | outdoor qty        |
+ * | package_unit (AC)     | never (not in QB)              | csv_price                 | n/a                |
+ * | heat_kit              | indoor found                   | QB indoor                 | indoor qty         |
+ * | warranty              | never                          | csv_price                 | n/a                |
+ */
+function resolveSync(row, category) {
+  // AC condensers — never in QB
+  if (category === 'ac') {
+    return { qbSynced: false, price: row.csv_price, qty: null };
+  }
+
+  // Warranty — not inventory items
+  if (category === 'warranty') {
+    return { qbSynced: false, price: row.csv_price, qty: null };
+  }
+
+  // Heat pump / inverter — need BOTH outdoor + indoor
+  if (category === 'heat_pump' || category === 'inverter') {
+    const hasOut = row.qb_outdoor_price != null;
+    const hasIn = row.qb_indoor_price != null;
+    if (hasOut && hasIn) {
+      return {
+        qbSynced: true,
+        price: row.qb_outdoor_price + row.qb_indoor_price,
+        qty: Math.min(row.outdoor_qty ?? 0, row.indoor_qty ?? 0),
+      };
+    }
+    return { qbSynced: false, price: row.csv_price, qty: null };
+  }
+
+  // Package unit — HP models sync, AC models don't
+  if (category === 'package_unit') {
+    const isHP = (row.qb_item_name || '').includes('Pkg HP');
+    if (isHP && row.qb_outdoor_price != null) {
+      return {
+        qbSynced: true,
+        price: row.qb_outdoor_price,
+        qty: row.outdoor_qty ?? 0,
+      };
+    }
+    return { qbSynced: false, price: row.csv_price, qty: null };
+  }
+
+  // Heat kit — match on indoor_model
+  if (category === 'heat_kit') {
+    if (row.qb_indoor_price != null) {
+      return {
+        qbSynced: true,
+        price: row.qb_indoor_price,
+        qty: row.indoor_qty ?? 0,
+      };
+    }
+    return { qbSynced: false, price: row.csv_price, qty: null };
+  }
+
+  // Fallback
+  return { qbSynced: false, price: row.csv_price, qty: null };
+}
+
+/**
  * Transform flat SQL rows into clean JSON response per category.
  */
 function formatPricingResponse(rows, category) {
   // Get the most recent QB sync time from any matched item
   let lastSync = null;
   for (const row of rows) {
-    if (row.price_updated_at && (!lastSync || row.price_updated_at > lastSync)) {
-      lastSync = row.price_updated_at;
+    for (const ts of [row.outdoor_synced_at, row.indoor_synced_at]) {
+      if (ts && (!lastSync || ts > lastSync)) {
+        lastSync = ts;
+      }
     }
   }
 
   const items = rows.map(row => {
-    const qbSynced = row.qb_price != null;
-    const price = qbSynced ? row.qb_price : row.csv_price;
+    const { qbSynced, price, qty } = resolveSync(row, category);
 
     const base = {
       qb_item_name: row.qb_item_name,
@@ -156,7 +230,17 @@ function formatPricingResponse(rows, category) {
     };
 
     if (qbSynced) {
-      base.qty_on_hand = row.qty_on_hand;
+      base.qty_on_hand = qty;
+    }
+
+    // Include QB component prices when available
+    if (row.qb_outdoor_price != null) {
+      base.qb_outdoor_price = row.qb_outdoor_price;
+      base.outdoor_full_name = row.outdoor_full_name;
+    }
+    if (row.qb_indoor_price != null) {
+      base.qb_indoor_price = row.qb_indoor_price;
+      base.indoor_full_name = row.indoor_full_name;
     }
 
     // Category-specific fields
@@ -188,7 +272,7 @@ function formatPricingResponse(rows, category) {
       });
     } else if (category === 'heat_kit') {
       Object.assign(base, {
-        outdoor_model: row.outdoor_model,
+        indoor_model: row.indoor_model,
         heat_kit_type: row.heat_kit_type,
         voltage_specs: safeJsonParse(row.voltage_specs),
       });

@@ -6,6 +6,7 @@ const cache = require('../db/cache');
 const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
+const { resolveOrderItems } = require('./item-resolver');
 
 const router = express.Router();
 
@@ -49,12 +50,15 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     });
   }
 
+  // Resolve combined system names into individual QB parts
+  const resolvedItems = resolveOrderItems(items);
+
   const qbxml = templates.buildSalesOrderAdd({
     customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
     memo: memo || 'Phone order via Sophia AI',
-    items: items.map((i) => ({
+    items: resolvedItems.map((i) => ({
       name: i.name,
       description: i.description,
       qty: i.qty || 1,
@@ -127,12 +131,15 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     });
   }
 
+  // Resolve combined system names into individual QB parts
+  const resolvedItems = resolveOrderItems(items);
+
   const qbxml = templates.buildInvoiceAdd({
     customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
     memo: memo || 'Phone order via Sophia AI',
-    items: items.map((i) => ({
+    items: resolvedItems.map((i) => ({
       name: i.name,
       description: i.description,
       qty: i.qty || 1,

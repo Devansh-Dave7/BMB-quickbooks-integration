@@ -101,6 +101,19 @@ function buildHeatKitQbName(row) {
   return `Heat Kit-${model} (${typeAbbrev})`;
 }
 
+/**
+ * Extract the actual QB inventory item name for a heat kit.
+ * Split system kits use the model as-is (e.g. "ECB45-5-P").
+ * Package unit kits have a "-1" suffix in QB (e.g. "PHK05BP-1").
+ */
+function extractHeatKitQbModel(row) {
+  const model = row.Model;
+  if (row.Type === 'Package Unit') {
+    return `${model}-1`;
+  }
+  return model;
+}
+
 function tierName(efficiencyTier) {
   if (efficiencyTier.includes('Good')) return 'Good';
   if (efficiencyTier.includes('Better')) return 'Better';
@@ -234,7 +247,7 @@ function processHeatKits(csvPath) {
     efficiency_tier: null,
     ahri_ref: null,
     outdoor_model: null,
-    indoor_model: null,
+    indoor_model: extractHeatKitQbModel(row),
     outdoor_price: null,
     indoor_price: null,
     csv_price: parseNum(row.Price),

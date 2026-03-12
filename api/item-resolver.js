@@ -24,7 +24,14 @@ function resolveItem(itemName) {
 
   if (!pm) return null;
 
+  // Split systems (heat_pump, ac, inverter) need BOTH outdoor + indoor.
+  // If either component is missing from QB inventory, don't expand —
+  // pass through unchanged so we don't create a partial order.
+  const needsBoth = ['heat_pump', 'ac', 'inverter'].includes(pm.category);
+
   const result = { category: pm.category, parts: [] };
+  let outdoorFound = false;
+  let indoorFound = false;
 
   // Resolve outdoor component
   if (pm.outdoor_model) {
@@ -34,6 +41,7 @@ function resolveItem(itemName) {
     `).get(pm.outdoor_model);
 
     if (ic) {
+      outdoorFound = true;
       result.parts.push({
         name: ic.full_name || ic.name,
         description: `Outdoor unit - ${pm.qb_item_name}`,
@@ -51,6 +59,7 @@ function resolveItem(itemName) {
     `).get(pm.indoor_model);
 
     if (ic) {
+      indoorFound = true;
       result.parts.push({
         name: ic.full_name || ic.name,
         description: `Indoor unit - ${pm.qb_item_name}`,
@@ -58,6 +67,11 @@ function resolveItem(itemName) {
         qty_available: ic.qty_on_hand,
       });
     }
+  }
+
+  // For split systems, require both components — don't create partial orders
+  if (needsBoth && (!outdoorFound || !indoorFound)) {
+    return null;
   }
 
   return result.parts.length > 0 ? result : null;

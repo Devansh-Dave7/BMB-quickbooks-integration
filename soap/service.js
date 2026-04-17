@@ -314,6 +314,10 @@ async function processResponse(ticket, responseXml, webhookDispatcher) {
         await handleCustomerAddRs(responseXml, sentItem);
         break;
 
+      case 'PriceLevelQueryRs':
+        await handlePriceLevelQueryRs(responseXml);
+        break;
+
       case 'SalesOrderQueryRs':
       case 'InvoiceQueryRs':
         // Query responses — fire callback if one was set
@@ -597,6 +601,22 @@ async function handleCustomerAddRs(xml, sentItem) {
     cache.upsertCustomer(customer);
     console.log(`[SOAP] Customer created: ${customer.fullName || customer.name} (ListID: ${customer.listId})`);
   }
+}
+
+/**
+ * Handle PriceLevelQueryRs — cache price levels from QB.
+ */
+async function handlePriceLevelQueryRs(xml) {
+  const { status, priceLevels } = await parsers.parsePriceLevelQueryRs(xml);
+
+  if (status.statusCode !== 0) {
+    throw new Error(`PriceLevelQuery error [${status.statusCode}]: ${status.statusMessage}`);
+  }
+
+  if (priceLevels.length > 0) {
+    cache.bulkUpsertPriceLevels(priceLevels);
+  }
+  console.log(`[SOAP] Cached ${priceLevels.length} price levels`);
 }
 
 module.exports = { buildService };

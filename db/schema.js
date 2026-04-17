@@ -21,6 +21,7 @@ function getDb() {
   db.exec('PRAGMA foreign_keys = ON');
 
   initTables(db);
+  migrateSchema(db);
   return db;
 }
 
@@ -72,6 +73,18 @@ function initTables(db) {
       is_active INTEGER DEFAULT 1,
       billing_address TEXT,
       shipping_address TEXT,
+      raw_data TEXT,
+      synced_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Cached price levels from QB
+    CREATE TABLE IF NOT EXISTS price_level_cache (
+      list_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      is_active INTEGER DEFAULT 1,
+      level_type TEXT,
+      fixed_percentage REAL,
+      per_item_data TEXT,
       raw_data TEXT,
       synced_at TEXT DEFAULT (datetime('now'))
     );
@@ -129,6 +142,9 @@ function initTables(db) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    CREATE INDEX IF NOT EXISTS idx_price_level_name
+      ON price_level_cache(name COLLATE NOCASE);
+
     -- Indexes for common queries
     CREATE INDEX IF NOT EXISTS idx_queue_status_priority
       ON request_queue(status, priority, created_at);
@@ -166,6 +182,18 @@ function initTables(db) {
     CREATE INDEX IF NOT EXISTS idx_pm_indoor_model
       ON pricing_metadata(indoor_model COLLATE NOCASE);
   `);
+}
+
+function migrateSchema(db) {
+  const cols = db.prepare("PRAGMA table_info('customer_cache')").all();
+  const colNames = cols.map((c) => c.name);
+
+  if (!colNames.includes('price_level_list_id')) {
+    db.exec("ALTER TABLE customer_cache ADD COLUMN price_level_list_id TEXT");
+  }
+  if (!colNames.includes('price_level_name')) {
+    db.exec("ALTER TABLE customer_cache ADD COLUMN price_level_name TEXT");
+  }
 }
 
 function closeDb() {

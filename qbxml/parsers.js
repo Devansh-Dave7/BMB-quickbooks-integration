@@ -102,6 +102,7 @@ async function parseCustomerQueryRs(xmlString) {
     isActive: safeGet(c, 'IsActive') !== 'false',
     billingAddress: extractAddress(c.BillAddress),
     shippingAddress: extractAddress(c.ShipAddress),
+    priceLevelRef: extractRef(c.PriceLevelRef),
     rawData: c,
   }));
 
@@ -409,6 +410,57 @@ async function parseErrorResponse(xmlString) {
  * Detect the response type from raw QBXML.
  * Returns the key like 'CustomerQueryRs', 'SalesOrderAddRs', etc.
  */
+// ─── Price Level Response Parser ────────────────────────────────
+
+/**
+ * Parse PriceLevelQueryRs.
+ * Returns array of price level objects.
+ */
+async function parsePriceLevelQueryRs(xmlString) {
+  const msgs = await parseQBXML(xmlString);
+  const rs = msgs.PriceLevelQueryRs;
+  if (!rs) throw new Error('No PriceLevelQueryRs in response');
+
+  const status = extractStatus(rs);
+  if (status.statusCode !== 0) {
+    return { status, priceLevels: [] };
+  }
+
+  let items = rs.PriceLevelRet;
+  if (!items) return { status, priceLevels: [] };
+  if (!Array.isArray(items)) items = [items];
+
+  const priceLevels = items.map((pl) => {
+    const levelType = safeGet(pl, 'PriceLevelType');
+    let perItemData = null;
+
+    if (levelType === 'PerItem' && pl.PriceLevelPerItemRet) {
+      let perItems = pl.PriceLevelPerItemRet;
+      if (!Array.isArray(perItems)) perItems = [perItems];
+
+      perItemData = perItems.map((pi) => ({
+        itemRef: extractRef(pi.ItemRef),
+        customPrice: pi.CustomPrice ? parseFloat(pi.CustomPrice) : null,
+        customPricePercent: pi.CustomPricePercent ? parseFloat(pi.CustomPricePercent) : null,
+      }));
+    }
+
+    return {
+      listId: safeGet(pl, 'ListID'),
+      name: safeGet(pl, 'Name'),
+      isActive: safeGet(pl, 'IsActive') !== 'false',
+      levelType,
+      fixedPercentage: pl.PriceLevelFixedPercentage
+        ? parseFloat(pl.PriceLevelFixedPercentage)
+        : null,
+      perItemData,
+      rawData: pl,
+    };
+  });
+
+  return { status, priceLevels };
+}
+
 async function detectResponseType(xmlString) {
   const msgs = await parseQBXML(xmlString);
   return Object.keys(msgs).find((k) => k.endsWith('Rs')) || null;
@@ -425,6 +477,7 @@ module.exports = {
   parseSalesOrderQueryRs,
   parseInvoiceAddRs,
   parseInvoiceQueryRs,
+  parsePriceLevelQueryRs,
   parseErrorResponse,
   detectResponseType,
 };

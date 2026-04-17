@@ -186,6 +186,7 @@ router.post('/query', validate(validateQueryPayload), (req, res) => {
     ItemInventoryQuery: templates.buildItemInventoryQuery,
     SalesOrderQuery: templates.buildSalesOrderQuery,
     InvoiceQuery: templates.buildInvoiceQuery,
+    PriceLevelQuery: templates.buildPriceLevelQuery,
   };
 
   const builder = builderMap[type];
@@ -346,6 +347,17 @@ router.get('/pricing/:category', (req, res) => {
   res.json(response);
 });
 
+// ─── GET /api/price-levels — Cached price levels ────────────────
+
+router.get('/price-levels', (req, res) => {
+  const priceLevels = cache.getAllPriceLevels();
+  res.json({
+    count: priceLevels.length,
+    last_sync: cache.getPriceLevelSyncTime(),
+    price_levels: priceLevels,
+  });
+});
+
 // ─── GET /api/status — Server health + sync info ────────────────
 
 router.get('/status', (req, res) => {
@@ -358,6 +370,7 @@ router.get('/status', (req, res) => {
     cache_freshness: {
       inventory: cache.getInventorySyncTime(),
       customers: cache.getCustomerSyncTime(),
+      price_levels: cache.getPriceLevelSyncTime(),
     },
   });
 });

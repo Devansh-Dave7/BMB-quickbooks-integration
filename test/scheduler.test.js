@@ -12,6 +12,7 @@ describe('scheduler — queueBackgroundSyncs', () => {
 
   it('queues inventory sync on every cycle (inventoryEveryN=1)', () => {
     config.sync.inventoryEveryN = 1;
+    config.sync.priceLevelEveryN = 999;
     const queued = queueBackgroundSyncs(1);
     assert.ok(queued >= 1);
     assert.ok(getQueueDepth() >= 1);
@@ -20,19 +21,22 @@ describe('scheduler — queueBackgroundSyncs', () => {
   it('queues customer sync on cycle divisible by customerEveryN', () => {
     config.sync.inventoryEveryN = 1;
     config.sync.customerEveryN = 5;
+    config.sync.priceLevelEveryN = 5;
     const queued = queueBackgroundSyncs(5);
-    assert.equal(queued, 2); // inventory + customer
+    assert.equal(queued, 3); // inventory + customer + price levels
   });
 
   it('skips customer sync on non-divisible cycle', () => {
     config.sync.inventoryEveryN = 1;
     config.sync.customerEveryN = 5;
+    config.sync.priceLevelEveryN = 5;
     const queued = queueBackgroundSyncs(3);
     assert.equal(queued, 1); // inventory only
   });
 
   it('does not duplicate pending syncs', () => {
     config.sync.inventoryEveryN = 1;
+    config.sync.priceLevelEveryN = 999;
     queueBackgroundSyncs(1); // queues inventory
     const queued = queueBackgroundSyncs(2); // should skip duplicate
     assert.equal(queued, 0);
@@ -41,14 +45,16 @@ describe('scheduler — queueBackgroundSyncs', () => {
   it('queues 0 when no syncs due', () => {
     config.sync.inventoryEveryN = 3;
     config.sync.customerEveryN = 5;
-    const queued = queueBackgroundSyncs(2); // not divisible by 3 or 5
+    config.sync.priceLevelEveryN = 7;
+    const queued = queueBackgroundSyncs(2); // not divisible by 3, 5, or 7
     assert.equal(queued, 0);
   });
 
   it('returns count of syncs queued', () => {
     config.sync.inventoryEveryN = 1;
     config.sync.customerEveryN = 1;
+    config.sync.priceLevelEveryN = 1;
     const queued = queueBackgroundSyncs(1);
-    assert.equal(queued, 2);
+    assert.equal(queued, 3);
   });
 });

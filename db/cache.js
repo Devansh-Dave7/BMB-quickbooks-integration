@@ -130,11 +130,13 @@ function getInventorySyncTime() {
  */
 function upsertCustomer(customer) {
   const db = getDb();
+  const plRef = customer.priceLevelRef || {};
   db.prepare(`
     INSERT INTO customer_cache
       (list_id, name, full_name, company_name, phone, email, balance,
-       credit_limit, terms, is_active, billing_address, shipping_address, raw_data, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       credit_limit, terms, is_active, billing_address, shipping_address,
+       price_level_list_id, price_level_name, raw_data, synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(list_id) DO UPDATE SET
       name = excluded.name,
       full_name = excluded.full_name,
@@ -147,6 +149,8 @@ function upsertCustomer(customer) {
       is_active = excluded.is_active,
       billing_address = excluded.billing_address,
       shipping_address = excluded.shipping_address,
+      price_level_list_id = excluded.price_level_list_id,
+      price_level_name = excluded.price_level_name,
       raw_data = excluded.raw_data,
       synced_at = datetime('now')
   `).run(
@@ -162,6 +166,8 @@ function upsertCustomer(customer) {
     customer.isActive !== undefined ? (customer.isActive ? 1 : 0) : 1,
     customer.billingAddress ? JSON.stringify(customer.billingAddress) : null,
     customer.shippingAddress ? JSON.stringify(customer.shippingAddress) : null,
+    plRef.listId || null,
+    plRef.fullName || null,
     customer.rawData ? JSON.stringify(customer.rawData) : null
   );
 }
@@ -314,6 +320,63 @@ function getPendingCallbacks() {
   `).all();
 }
 
+// ─── Price Level Cache ──────────────────────────────────────────
+
+function upsertPriceLevel(pl) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO price_level_cache
+      (list_id, name, is_active, level_type, fixed_percentage, per_item_data, raw_data, synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(list_id) DO UPDATE SET
+      name = excluded.name,
+      is_active = excluded.is_active,
+      level_type = excluded.level_type,
+      fixed_percentage = excluded.fixed_percentage,
+      per_item_data = excluded.per_item_data,
+      raw_data = excluded.raw_data,
+      synced_at = datetime('now')
+  `).run(
+    pl.listId,
+    pl.name,
+    pl.isActive ? 1 : 0,
+    pl.levelType || null,
+    pl.fixedPercentage || null,
+    pl.perItemData ? JSON.stringify(pl.perItemData) : null,
+    pl.rawData ? JSON.stringify(pl.rawData) : null
+  );
+}
+
+function bulkUpsertPriceLevels(priceLevels) {
+  const db = getDb();
+  db.exec('BEGIN');
+  try {
+    for (const pl of priceLevels) {
+      upsertPriceLevel(pl);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  return priceLevels.length;
+}
+
+function getAllPriceLevels() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM price_level_cache WHERE is_active = 1 ORDER BY name COLLATE NOCASE
+  `).all();
+}
+
+function getPriceLevelSyncTime() {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT MAX(synced_at) as last_sync FROM price_level_cache
+  `).get();
+  return row ? row.last_sync : null;
+}
+
 module.exports = {
   // Inventory
   upsertInventoryItem,
@@ -329,6 +392,11 @@ module.exports = {
   searchCustomers,
   getCustomer,
   getCustomerSyncTime,
+  // Price Levels
+  upsertPriceLevel,
+  bulkUpsertPriceLevels,
+  getAllPriceLevels,
+  getPriceLevelSyncTime,
   // Orders
   storeOrderResponse,
   getRecentOrders,

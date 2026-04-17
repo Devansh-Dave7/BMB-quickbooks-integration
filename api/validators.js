@@ -47,7 +47,7 @@ function validateQueryPayload(body) {
 
   const validTypes = [
     'CustomerQuery', 'ItemQuery', 'ItemInventoryQuery',
-    'SalesOrderQuery', 'InvoiceQuery',
+    'SalesOrderQuery', 'InvoiceQuery', 'PriceLevelQuery',
   ];
 
   if (!body.type || !validTypes.includes(body.type)) {

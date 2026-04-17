@@ -20,6 +20,7 @@ const config = {
   sync: {
     inventoryEveryN: parseInt(process.env.INVENTORY_SYNC_EVERY_N_CYCLES, 10) || 1,
     customerEveryN: parseInt(process.env.CUSTOMER_SYNC_EVERY_N_CYCLES, 10) || 5,
+    priceLevelEveryN: parseInt(process.env.PRICE_LEVEL_SYNC_EVERY_N_CYCLES, 10) || 5,
   },
 
   // Outbound webhook URLs

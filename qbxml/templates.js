@@ -381,6 +381,33 @@ function buildItemInventoryAdd(itemData) {
   return { qbxml: wrapInEnvelope(parts.join('\n    ')), warnings };
 }
 
+// ─── Price Level Query ──────────────────────────────────────────
+
+/**
+ * Build a PriceLevelQueryRq.
+ * params.listId — optional, specific price level ListID
+ * params.fullName — optional, specific price level name
+ * params.activeStatus — optional, 'ActiveOnly' (default), 'InactiveOnly', 'All'
+ * params.maxReturned — optional, limit results
+ */
+function buildPriceLevelQuery(params = {}) {
+  const parts = ['<PriceLevelQueryRq>'];
+
+  if (params.listId) {
+    parts.push(`  <ListID>${escXml(params.listId)}</ListID>`);
+  } else if (params.fullName) {
+    parts.push(`  <FullName>${escXml(params.fullName)}</FullName>`);
+  } else {
+    if (params.maxReturned) {
+      parts.push(`  <MaxReturned>${parseInt(params.maxReturned, 10)}</MaxReturned>`);
+    }
+    parts.push(`  <ActiveStatus>${escXml(params.activeStatus || 'ActiveOnly')}</ActiveStatus>`);
+  }
+
+  parts.push('</PriceLevelQueryRq>');
+  return wrapInEnvelope(parts.join('\n    '));
+}
+
 module.exports = {
   buildCustomerQuery,
   buildCustomerAdd,
@@ -391,5 +418,6 @@ module.exports = {
   buildInvoiceAdd,
   buildInvoiceQuery,
   buildItemInventoryAdd,
+  buildPriceLevelQuery,
   escXml,
 };

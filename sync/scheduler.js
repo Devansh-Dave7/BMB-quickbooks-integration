@@ -60,6 +60,27 @@ function queueBackgroundSyncs(cycle) {
     }
   }
 
+  // Price level sync
+  if (cycle % config.sync.priceLevelEveryN === 0) {
+    if (!hasPendingOfType('PriceLevelQuery')) {
+      const qbxml = templates.buildPriceLevelQuery({
+        activeStatus: 'ActiveOnly',
+      });
+
+      queue.addToQueue({
+        type: 'PriceLevelQuery',
+        qbxml,
+        priority: queue.PRIORITY.BACKGROUND,
+        metadata: { trigger: 'scheduler', cycle },
+      });
+
+      queued++;
+      console.log(`[SCHEDULER] Queued price level sync (cycle ${cycle})`);
+    } else {
+      console.log(`[SCHEDULER] Price level sync skipped — already pending (cycle ${cycle})`);
+    }
+  }
+
   if (queued > 0) {
     log.logEvent({
       event: 'scheduler',

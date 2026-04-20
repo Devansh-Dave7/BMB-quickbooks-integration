@@ -596,6 +596,126 @@ describe('API — pricing + customer routes with price levels', () => {
     assert.equal(res.body.price_level, null);
   });
 
+  it('POST /api/order with wholesale company match applies price level to line rates', async () => {
+    seedPricingRow();
+    seedInventory('7HP14F24P', 'Allied Res:Split HP:7HP14F24P', 1700);
+    seedInventory('7AH1AC24PX-71', 'Allied Res:A/H\'s:7AH1AC24PX-71', 824);
+    seedPerItemLevel('PL-1', 'Wholesale Premium', [
+      { itemRef: { listId: 'IO', fullName: 'Allied Res:Split HP:7HP14F24P' }, customPrice: 1574 },
+      { itemRef: { listId: 'II', fullName: 'Allied Res:A/H\'s:7AH1AC24PX-71' }, customPrice: 830 },
+    ]);
+    seedCustomer({
+      listId: 'C-WHOLESALE',
+      name: 'Alice Johnson',
+      fullName: 'Alice Johnson',
+      companyName: 'Wholesale Co LLC',
+      priceLevelListId: 'PL-1',
+    });
+    seedCustomer({
+      listId: 'C-OTHER',
+      name: 'Alice Johnson Services',
+      fullName: 'Alice Johnson Services',
+      companyName: null,
+      // no price level
+    });
+
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Alice Johnson',
+        company_name: 'Wholesale Co LLC',
+        items: [{ name: '2T 14.3 S2 HP Gd-7AH1AC24PX', qty: 1 }],
+      },
+    });
+
+    assert.equal(res.statusCode, 202);
+
+    // Inspect the queued qbxml — line rates must reflect the price level
+    const db = getDb();
+    const row = db.prepare(
+      `SELECT qbxml FROM request_queue WHERE id = ?`
+    ).get(res.body.queue_id);
+    assert.ok(row, 'order was queued');
+    assert.match(row.qbxml, /<Rate>1574\.00<\/Rate>/, 'outdoor rate is wholesale');
+    assert.match(row.qbxml, /<Rate>830\.00<\/Rate>/, 'indoor rate is wholesale');
+    assert.ok(!/<Rate>1700\.00<\/Rate>/.test(row.qbxml), 'no list outdoor rate');
+    assert.ok(!/<Rate>824\.00<\/Rate>/.test(row.qbxml), 'no list indoor rate');
+  });
+
+  it('POST /api/order does NOT apply price level on fuzzy-only match', async () => {
+    seedPricingRow();
+    seedInventory('7HP14F24P', 'Allied Res:Split HP:7HP14F24P', 1700);
+    seedInventory('7AH1AC24PX-71', 'Allied Res:A/H\'s:7AH1AC24PX-71', 824);
+    seedFixedPercentageLevel('PL-1', 'Wholesale 10%', -10);
+    // Only exists as a fuzzy name collision — should NOT apply level
+    seedCustomer({
+      listId: 'C1',
+      name: 'Smith HVAC Services',
+      fullName: 'Smith HVAC Services',
+      companyName: 'Smith HVAC Services',
+      priceLevelListId: 'PL-1',
+    });
+
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Smith', // partial name — fuzzy match only
+        company_name: '',       // no company hint
+        items: [{ name: '2T 14.3 S2 HP Gd-7AH1AC24PX', qty: 1 }],
+      },
+    });
+
+    assert.equal(res.statusCode, 202);
+    const db = getDb();
+    const row = db.prepare(
+      `SELECT qbxml FROM request_queue WHERE id = ?`
+    ).get(res.body.queue_id);
+    // List rates kept — fuzzy match must NOT apply the wholesale level
+    assert.match(row.qbxml, /<Rate>1700\.00<\/Rate>/);
+    assert.match(row.qbxml, /<Rate>824\.00<\/Rate>/);
+  });
+
+  it('POST /api/order prefers company over person when both could match', async () => {
+    seedPricingRow();
+    seedInventory('7HP14F24P', 'Allied Res:Split HP:7HP14F24P', 1700);
+    seedInventory('7AH1AC24PX-71', 'Allied Res:A/H\'s:7AH1AC24PX-71', 824);
+    seedFixedPercentageLevel('PL-RETAIL', 'Retail markup', 10);
+    seedFixedPercentageLevel('PL-WHOLESALE', 'Wholesale discount', -20);
+    // Person with retail level
+    seedCustomer({
+      listId: 'C-PERSON',
+      name: 'Dave Test',
+      fullName: 'Dave Test',
+      priceLevelListId: 'PL-RETAIL',
+    });
+    // Company with wholesale level — should win
+    seedCustomer({
+      listId: 'C-COMPANY',
+      name: 'Wholesale Co',
+      fullName: 'Wholesale Co',
+      companyName: 'Wholesale Co',
+      priceLevelListId: 'PL-WHOLESALE',
+    });
+
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Dave Test',
+        company_name: 'Wholesale Co',
+        items: [{ name: '2T 14.3 S2 HP Gd-7AH1AC24PX', qty: 1 }],
+      },
+    });
+
+    assert.equal(res.statusCode, 202);
+    const db = getDb();
+    const row = db.prepare(
+      `SELECT qbxml FROM request_queue WHERE id = ?`
+    ).get(res.body.queue_id);
+    // -20% on 1700 = 1360, -20% on 824 = 659.20
+    assert.match(row.qbxml, /<Rate>1360\.00<\/Rate>/);
+    assert.match(row.qbxml, /<Rate>659\.20<\/Rate>/);
+  });
+
   it('GET /api/pricing/_/resolve-customer returns diagnostic payload', async () => {
     seedPricingRow();
     seedInventory('7HP14F24P', 'Allied Res:Split HP:7HP14F24P', 1700);

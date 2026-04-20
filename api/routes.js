@@ -14,6 +14,25 @@ const router = express.Router();
 router.use(apiKeyAuth);
 
 /**
+ * Locate the QB customer for order/invoice creation.
+ * Prefers an exact match (company first, then person) so price level lookups
+ * target the right wholesale account. Falls back to fuzzy name-only matching
+ * for display purposes — but price level MUST NOT be applied to fuzzy matches,
+ * which is why the result flags `isExact`.
+ */
+function findCustomerForOrder(customerName, companyName) {
+  const exact = pricing.findCustomerForPricing(customerName, companyName);
+  if (exact) {
+    return { customer: exact.customer, isExact: true, matched_on: exact.matched_on };
+  }
+  const fuzzy = cache.getCustomer(customerName);
+  if (fuzzy) {
+    return { customer: fuzzy, isExact: false, matched_on: 'fuzzy' };
+  }
+  return null;
+}
+
+/**
  * Look up a customer's price level from cache and emit an audit log entry.
  * Returns the price level object or null. Safe to call with null customer.
  */
@@ -67,20 +86,26 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
     is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
 
-  // Resolve customer name: look up in cache by FullName, then CompanyName, then partial
-  // This handles cases where caller sends company name but QB stores by person name
+  // Resolve customer: prefer an exact company-or-person match (needed for
+  // accurate price level lookup), fall back to fuzzy match for display only.
   let resolvedCustomerName = customer_name;
   let customerMatch = null;
+  let matchIsExact = false;
   if (!customer_ref) {
-    customerMatch = cache.getCustomer(customer_name);
-    if (customerMatch) {
+    const match = findCustomerForOrder(customer_name, company_name);
+    if (match) {
+      customerMatch = match.customer;
+      matchIsExact = match.isExact;
       resolvedCustomerName = customerMatch.full_name || customerMatch.name;
     }
   }
 
-  // Resolve price level for this customer (if any) so order line rates are
-  // customer-adjusted in the SalesOrderAdd qbXML — no PriceLevelRef needed.
-  const priceLevel = resolvePriceLevelForCustomer(customerMatch, 'order_creation');
+  // Resolve price level — ONLY for exact matches. A fuzzy name collision
+  // (e.g. "Smith HVAC" matching "Smith HVAC Services") must not pull the
+  // wrong wholesale level onto someone else's order.
+  const priceLevel = matchIsExact
+    ? resolvePriceLevelForCustomer(customerMatch, 'order_creation')
+    : null;
 
   // If new customer, queue a CustomerAdd first (processed before SalesOrderAdd)
   let customerQueueId = null;
@@ -153,18 +178,23 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
     is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
 
-  // Resolve customer name (same logic as /order)
+  // Same exact-first, fuzzy-fallback strategy as /api/order.
   let resolvedCustomerName = customer_name;
   let customerMatch = null;
+  let matchIsExact = false;
   if (!customer_ref) {
-    customerMatch = cache.getCustomer(customer_name);
-    if (customerMatch) {
+    const match = findCustomerForOrder(customer_name, company_name);
+    if (match) {
+      customerMatch = match.customer;
+      matchIsExact = match.isExact;
       resolvedCustomerName = customerMatch.full_name || customerMatch.name;
     }
   }
 
-  // Apply customer-specific price level to line components (same as /order).
-  const priceLevel = resolvePriceLevelForCustomer(customerMatch, 'invoice_creation');
+  // Price level only on exact matches (same rationale as /order).
+  const priceLevel = matchIsExact
+    ? resolvePriceLevelForCustomer(customerMatch, 'invoice_creation')
+    : null;
 
   // If new customer, queue a CustomerAdd first (processed before InvoiceAdd)
   let customerQueueId = null;

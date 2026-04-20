@@ -7,14 +7,18 @@
  *   Line 2: indoor unit (e.g. "Allied Res:A/H's:7AH1AC18PX-71") at QB indoor price
  *
  * Uses inventory_cache full_name (hierarchical QB name) for order line items.
+ *
+ * When a `priceLevel` is supplied, each resolved component's rate is adjusted
+ * via the level (FixedPercentage or PerItem) before being returned.
  */
 const { getDb } = require('../db/schema');
+const { applyPriceLevelToItem } = require('../db/pricing');
 
 /**
  * Look up a pricing_metadata row by its qb_item_name, then resolve
  * outdoor_model / indoor_model against inventory_cache for full_name + price.
  */
-function resolveItem(itemName) {
+function resolveItem(itemName, priceLevel = null) {
   const db = getDb();
 
   // Find the pricing metadata entry
@@ -42,10 +46,14 @@ function resolveItem(itemName) {
 
     if (ic) {
       outdoorFound = true;
+      const fullName = ic.full_name || ic.name;
+      const listRate = ic.sales_price;
+      const rate = applyPriceLevelToItem(listRate, fullName, priceLevel);
       result.parts.push({
-        name: ic.full_name || ic.name,
+        name: fullName,
         description: `Outdoor unit - ${pm.qb_item_name}`,
-        rate: ic.sales_price,
+        rate,
+        list_rate: rate !== listRate ? listRate : undefined,
         qty_available: ic.qty_on_hand,
       });
     }
@@ -60,10 +68,14 @@ function resolveItem(itemName) {
 
     if (ic) {
       indoorFound = true;
+      const fullName = ic.full_name || ic.name;
+      const listRate = ic.sales_price;
+      const rate = applyPriceLevelToItem(listRate, fullName, priceLevel);
       result.parts.push({
-        name: ic.full_name || ic.name,
+        name: fullName,
         description: `Indoor unit - ${pm.qb_item_name}`,
-        rate: ic.sales_price,
+        rate,
+        list_rate: rate !== listRate ? listRate : undefined,
         qty_available: ic.qty_on_hand,
       });
     }
@@ -81,16 +93,22 @@ function resolveItem(itemName) {
  * Process an array of order items, expanding combined system names
  * into individual QB parts where possible.
  *
- * Items that can't be resolved (no QB match) pass through unchanged.
+ * Items that can't be resolved (no QB match) pass through unchanged —
+ * their `rate` is trusted as-is (e.g. Sophia already sent the adjusted price
+ * from the pricing tool response, so re-applying the level would double-count).
+ *
+ * Split components whose rate is pulled from inventory_cache DO get adjusted
+ * via the price level, since Sophia's caller rate is ignored there.
  *
  * @param {Array} items - Order items [{name, description, qty, rate}]
+ * @param {object} [priceLevel] - Cached price level (from cache.getPriceLevelByListId)
  * @returns {Array} Resolved items with individual QB parts
  */
-function resolveOrderItems(items) {
+function resolveOrderItems(items, priceLevel = null) {
   const resolved = [];
 
   for (const item of items) {
-    const expansion = resolveItem(item.name);
+    const expansion = resolveItem(item.name, priceLevel);
 
     if (expansion && expansion.parts.length > 0) {
       // Expand into individual QB parts

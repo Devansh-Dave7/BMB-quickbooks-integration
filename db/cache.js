@@ -369,6 +369,35 @@ function getAllPriceLevels() {
   `).all();
 }
 
+/**
+ * Look up a single price level by list_id. Returns null if not found or inactive.
+ * Parses per_item_data JSON into an object for direct use by resolver.
+ */
+function getPriceLevelByListId(listId) {
+  if (!listId) return null;
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT * FROM price_level_cache WHERE list_id = ? AND is_active = 1
+  `).get(listId);
+  if (!row) return null;
+
+  let perItemData = null;
+  if (row.per_item_data) {
+    try { perItemData = JSON.parse(row.per_item_data); }
+    catch { perItemData = null; }
+  }
+
+  return {
+    list_id: row.list_id,
+    name: row.name,
+    is_active: row.is_active === 1,
+    level_type: row.level_type,
+    fixed_percentage: row.fixed_percentage,
+    per_item_data: perItemData,
+    synced_at: row.synced_at,
+  };
+}
+
 function getPriceLevelSyncTime() {
   const db = getDb();
   const row = db.prepare(`
@@ -396,6 +425,7 @@ module.exports = {
   upsertPriceLevel,
   bulkUpsertPriceLevels,
   getAllPriceLevels,
+  getPriceLevelByListId,
   getPriceLevelSyncTime,
   // Orders
   storeOrderResponse,

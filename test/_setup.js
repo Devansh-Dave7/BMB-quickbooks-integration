@@ -14,6 +14,7 @@ config.apiKey = 'test-api-key-12345';
 config.nodeEnv = 'test';
 config.sync.inventoryEveryN = 1;
 config.sync.customerEveryN = 5;
+config.sync.priceLevelEveryN = 5;
 config.webhooks.orderCreated = '';
 config.webhooks.invoiceCreated = '';
 config.webhooks.inventoryUpdated = '';
@@ -37,8 +38,10 @@ function clearAllTables() {
   db.exec('DELETE FROM request_queue');
   db.exec('DELETE FROM inventory_cache');
   db.exec('DELETE FROM customer_cache');
+  db.exec('DELETE FROM price_level_cache');
   db.exec('DELETE FROM order_responses');
   db.exec('DELETE FROM sync_log');
+  db.exec('DELETE FROM pricing_metadata');
 }
 
 /**

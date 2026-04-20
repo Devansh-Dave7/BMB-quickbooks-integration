@@ -13,6 +13,54 @@ const router = express.Router();
 // All REST routes require API key
 router.use(apiKeyAuth);
 
+/**
+ * Look up a customer's price level from cache and emit an audit log entry.
+ * Returns the price level object or null. Safe to call with null customer.
+ */
+function resolvePriceLevelForCustomer(customerMatch, context) {
+  if (!customerMatch) return null;
+  if (!customerMatch.price_level_list_id) {
+    log.logEvent({
+      event: 'price_level_skipped',
+      detail: {
+        reason: 'no_level_assigned',
+        context,
+        customer: customerMatch.name,
+      },
+    });
+    return null;
+  }
+
+  const priceLevel = cache.getPriceLevelByListId(customerMatch.price_level_list_id);
+  if (!priceLevel) {
+    log.logEvent({
+      event: 'price_level_skipped',
+      detail: {
+        reason: 'level_not_in_cache',
+        context,
+        customer: customerMatch.name,
+        price_level_list_id: customerMatch.price_level_list_id,
+      },
+    });
+    return null;
+  }
+
+  log.logEvent({
+    event: 'price_level_applied',
+    detail: {
+      context,
+      customer: customerMatch.name,
+      price_level_name: priceLevel.name,
+      price_level_type: priceLevel.level_type,
+      price_level_list_id: priceLevel.list_id,
+      adjustment_percent:
+        priceLevel.level_type === 'FixedPercentage' ? priceLevel.fixed_percentage : null,
+    },
+  });
+
+  return priceLevel;
+}
+
 // ─── POST /api/order — Queue a sales order ──────────────────────
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
@@ -29,6 +77,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
       resolvedCustomerName = customerMatch.full_name || customerMatch.name;
     }
   }
+
+  // Resolve price level for this customer (if any) so order line rates are
+  // customer-adjusted in the SalesOrderAdd qbXML — no PriceLevelRef needed.
+  const priceLevel = resolvePriceLevelForCustomer(customerMatch, 'order_creation');
 
   // If new customer, queue a CustomerAdd first (processed before SalesOrderAdd)
   let customerQueueId = null;
@@ -51,7 +103,7 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   }
 
   // Resolve combined system names into individual QB parts
-  const resolvedItems = resolveOrderItems(items);
+  const resolvedItems = resolveOrderItems(items, priceLevel);
 
   const qbxml = templates.buildSalesOrderAdd({
     customerName: resolvedCustomerName,
@@ -111,6 +163,9 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     }
   }
 
+  // Apply customer-specific price level to line components (same as /order).
+  const priceLevel = resolvePriceLevelForCustomer(customerMatch, 'invoice_creation');
+
   // If new customer, queue a CustomerAdd first (processed before InvoiceAdd)
   let customerQueueId = null;
   if (is_new_customer) {
@@ -132,7 +187,7 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   }
 
   // Resolve combined system names into individual QB parts
-  const resolvedItems = resolveOrderItems(items);
+  const resolvedItems = resolveOrderItems(items, priceLevel);
 
   const qbxml = templates.buildInvoiceAdd({
     customerName: resolvedCustomerName,
@@ -306,7 +361,21 @@ router.get('/customer/:name', (req, res) => {
     return res.status(404).json({ error: 'Customer not found', query: req.params.name });
   }
 
-  res.json(customer);
+  let priceLevelInfo = null;
+  if (customer.price_level_list_id) {
+    const pl = cache.getPriceLevelByListId(customer.price_level_list_id);
+    if (pl) {
+      priceLevelInfo = {
+        list_id: pl.list_id,
+        name: pl.name,
+        type: pl.level_type,
+        fixed_percentage: pl.fixed_percentage,
+        per_item_count: pl.per_item_data ? pl.per_item_data.length : 0,
+      };
+    }
+  }
+
+  res.json({ ...customer, price_level: priceLevelInfo });
 });
 
 // ─── GET /api/orders — Recent order responses ───────────────────
@@ -328,11 +397,105 @@ router.get('/pricing', (req, res) => {
   res.json({ categories });
 });
 
+// ─── GET /api/pricing/_/resolve-customer — Diagnostic trace ─────
+//
+// Registered BEFORE /api/pricing/:category so Express matches the literal
+// "_" segment first. Returns the customer match, price level, and a small
+// pricing preview when `category` is provided.
+
+router.get('/pricing/_/resolve-customer', (req, res) => {
+  const { customer, company, category } = req.query;
+  const personName = customer || null;
+  const companyName = company || null;
+
+  const match = pricing.findCustomerForPricing(personName, companyName);
+
+  const out = {
+    lookup: {
+      customer_query: personName,
+      company_query: companyName,
+      matched_customer: null,
+      price_level: null,
+    },
+  };
+
+  if (match) {
+    out.lookup.matched_customer = {
+      list_id: match.customer.list_id,
+      name: match.customer.name,
+      full_name: match.customer.full_name,
+      company_name: match.customer.company_name,
+      matched_on: match.matched_on,
+    };
+
+    if (match.customer.price_level_list_id) {
+      const pl = cache.getPriceLevelByListId(match.customer.price_level_list_id);
+      if (pl) {
+        out.lookup.price_level = {
+          list_id: pl.list_id,
+          name: pl.name,
+          type: pl.level_type,
+          fixed_percentage: pl.fixed_percentage,
+          per_item_count: pl.per_item_data ? pl.per_item_data.length : 0,
+        };
+      }
+    }
+  }
+
+  if (category) {
+    const validCategories = ['heat_pump', 'ac', 'inverter', 'package_unit', 'heat_kit', 'warranty'];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({
+        error: `Invalid category: ${category}`,
+        valid_categories: validCategories,
+      });
+    }
+
+    const resolved = pricing.resolvePricingForCustomer({
+      category,
+      personName,
+      companyName,
+    });
+    const formatted = pricing.formatPricingResponse(resolved.rows, category, {
+      customerMatch: resolved.customerMatch,
+      priceLevelApplied: resolved.priceLevelApplied,
+    });
+
+    const sample = formatted.items.slice(0, 5).map((item) => {
+      const list = item.list_csv_price != null ? item.list_csv_price : item.csv_price;
+      const adjusted = item.price;
+      const adjustedComponents = [];
+      if (item.list_qb_outdoor_price != null) adjustedComponents.push('outdoor');
+      if (item.list_qb_indoor_price != null) adjustedComponents.push('indoor');
+      return {
+        qb_item_name: item.qb_item_name,
+        list_price: list,
+        adjusted_price: adjusted,
+        savings: list != null && adjusted != null ? Math.round((list - adjusted) * 100) / 100 : null,
+        savings_pct:
+          list != null && adjusted != null && list > 0
+            ? Math.round(((list - adjusted) / list) * 10000) / 100
+            : null,
+        components_adjusted: adjustedComponents,
+      };
+    });
+
+    out.pricing_preview = {
+      category,
+      items_count: formatted.items.length,
+      items_overridden: resolved.priceLevelApplied ? resolved.priceLevelApplied.items_overridden : 0,
+      sample_items: sample,
+    };
+  }
+
+  res.json(out);
+});
+
 // ─── GET /api/pricing/:category — Get items in a category ───────
 
 router.get('/pricing/:category', (req, res) => {
   const { category } = req.params;
-  const { tonnage, tier } = req.query;
+  const { tonnage, tier, customer, company } = req.query;
 
   const validCategories = ['heat_pump', 'ac', 'inverter', 'package_unit', 'heat_kit', 'warranty'];
   if (!validCategories.includes(category)) {
@@ -340,6 +503,25 @@ router.get('/pricing/:category', (req, res) => {
       error: `Invalid category: ${category}`,
       valid_categories: validCategories,
     });
+  }
+
+  const hasCustomerQuery =
+    (customer && String(customer).trim()) || (company && String(company).trim());
+
+  if (hasCustomerQuery) {
+    const resolved = pricing.resolvePricingForCustomer({
+      category,
+      personName: customer,
+      companyName: company,
+      tonnage,
+      tier,
+    });
+    const response = pricing.formatPricingResponse(resolved.rows, category, {
+      customerMatch: resolved.customerMatch,
+      priceLevelApplied: resolved.priceLevelApplied,
+      customerQuery: { person: customer, company },
+    });
+    return res.json(response);
   }
 
   const rows = pricing.getPricingByCategory(category, { tonnage, tier });

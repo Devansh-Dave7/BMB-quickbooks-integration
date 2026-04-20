@@ -151,7 +151,7 @@ describe('pricing — applyPriceLevel (PerItem)', () => {
     const pl = {
       level_type: 'PerItem',
       per_item_data: [
-        { fullName: 'Allied Res:Split HP:7HP14F24P', customPrice: 1500 },
+        { itemRef: { listId: 'I1', fullName: 'Allied Res:Split HP:7HP14F24P' }, customPrice: 1500 },
       ],
     };
 
@@ -176,7 +176,7 @@ describe('pricing — applyPriceLevel (PerItem)', () => {
     const pl = {
       level_type: 'PerItem',
       per_item_data: [
-        { fullName: 'X:Y:Z', customPricePercent: -10 },
+        { itemRef: { listId: 'I1', fullName: 'X:Y:Z' }, customPricePercent: -10 },
       ],
     };
 
@@ -197,7 +197,7 @@ describe('pricing — applyPriceLevel (PerItem)', () => {
     };
     const pl = {
       level_type: 'PerItem',
-      per_item_data: [{ fullName: 'Other:Thing', customPrice: 99 }],
+      per_item_data: [{ itemRef: { listId: 'I1', fullName: 'Other:Thing' }, customPrice: 99 }],
     };
 
     const changed = pricing.applyPriceLevel(row, pl);
@@ -344,7 +344,7 @@ describe('pricing — resolvePricingForCustomer', () => {
     seedInventory('7HP14F24P', 'Allied Res:Split HP:7HP14F24P', 1700);
     seedInventory('7AH1AC24PX-71', 'Allied Res:A/H\'s:7AH1AC24PX-71', 824);
     seedPerItemLevel('PL-2', 'Premium', [
-      { fullName: 'Allied Res:Split HP:7HP14F24P', customPrice: 1450 },
+      { itemRef: { listId: 'I1', fullName: 'Allied Res:Split HP:7HP14F24P' }, customPrice: 1450 },
     ]);
     seedCustomer({
       listId: 'C1',
@@ -442,7 +442,7 @@ describe('item-resolver — resolveOrderItems with priceLevel', () => {
     const pl = {
       level_type: 'PerItem',
       per_item_data: [
-        { fullName: 'Allied Res:Split HP:7HP14F24P', customPrice: 1500 },
+        { itemRef: { listId: 'I1', fullName: 'Allied Res:Split HP:7HP14F24P' }, customPrice: 1500 },
       ],
     };
 

@@ -408,9 +408,10 @@ function applyPriceLevelToItem(price, itemFullName, priceLevel) {
   if (priceLevel.level_type === 'PerItem') {
     if (!itemFullName || !priceLevel.per_item_data) return price;
     const target = String(itemFullName).toLowerCase();
-    const entry = priceLevel.per_item_data.find(
-      (e) => e.fullName && String(e.fullName).toLowerCase() === target
-    );
+    const entry = priceLevel.per_item_data.find((e) => {
+      const fn = e.itemRef ? e.itemRef.fullName : e.fullName;
+      return fn && String(fn).toLowerCase() === target;
+    });
     if (!entry) return price;
     if (entry.customPrice != null) return round2(entry.customPrice);
     if (entry.customPricePercent != null) {
@@ -455,7 +456,8 @@ function applyPriceLevel(row, priceLevel) {
 
     const map = {};
     for (const entry of entries) {
-      if (entry.fullName) map[String(entry.fullName).toLowerCase()] = entry;
+      const fn = entry.itemRef ? entry.itemRef.fullName : entry.fullName;
+      if (fn) map[String(fn).toLowerCase()] = entry;
     }
 
     let changed = false;

@@ -113,6 +113,52 @@ function getInventoryItem(nameOrSku) {
 }
 
 /**
+ * Check whether an inventory item exists by name or full_name (case-insensitive).
+ * Used to validate Sophia-supplied qb_item_names that don't go through pricing_metadata.
+ */
+function inventoryItemExists(nameOrFullName) {
+  if (!nameOrFullName) return false;
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT 1 FROM inventory_cache
+    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    LIMIT 1
+  `).get(nameOrFullName, nameOrFullName);
+  return !!row;
+}
+
+/**
+ * Search inventory for parts/materials/supplies. Excludes items that are managed
+ * via pricing_metadata (system bundles, system outdoor/indoor components, heat
+ * kits, package units) so the result is the catalog of plain QB items the
+ * pricing tools don't already cover.
+ */
+function searchParts(query, { limit = 25 } = {}) {
+  const db = getDb();
+  const pattern = `%${query}%`;
+  return db.prepare(`
+    SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,
+           ic.qty_on_hand, ic.sales_price, ic.synced_at
+    FROM inventory_cache ic
+    WHERE ic.is_active = 1
+      AND (ic.name LIKE ? COLLATE NOCASE
+           OR ic.sku LIKE ? COLLATE NOCASE
+           OR ic.full_name LIKE ? COLLATE NOCASE
+           OR ic.description LIKE ? COLLATE NOCASE)
+      AND NOT EXISTS (
+        SELECT 1 FROM pricing_metadata pm
+        WHERE pm.qb_item_name = ic.name COLLATE NOCASE
+           OR pm.outdoor_model = ic.name COLLATE NOCASE
+           OR pm.indoor_model  = ic.name COLLATE NOCASE
+      )
+    ORDER BY
+      CASE WHEN ic.qty_on_hand > 0 THEN 0 ELSE 1 END,
+      ic.name COLLATE NOCASE
+    LIMIT ?
+  `).all(pattern, pattern, pattern, pattern, parseInt(limit, 10) || 25);
+}
+
+/**
  * Get the timestamp of the last inventory sync.
  */
 function getInventorySyncTime() {
@@ -412,7 +458,9 @@ module.exports = {
   bulkUpsertInventory,
   getAllInventory,
   searchInventory,
+  searchParts,
   getInventoryItem,
+  inventoryItemExists,
   getInventorySyncTime,
   // Customers
   upsertCustomer,

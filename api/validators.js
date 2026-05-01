@@ -32,6 +32,10 @@ function validateOrderPayload(body) {
     errors.push('callback_url must be a string');
   }
 
+  if (body.staff_followup_notes != null && typeof body.staff_followup_notes !== 'string') {
+    errors.push('staff_followup_notes must be a string');
+  }
+
   return errors;
 }
 

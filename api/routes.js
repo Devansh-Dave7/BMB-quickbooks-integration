@@ -6,7 +6,7 @@ const cache = require('../db/cache');
 const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
-const { resolveOrderItems } = require('./item-resolver');
+const { resolveOrderItems, validateItemsExist } = require('./item-resolver');
 
 const router = express.Router();
 
@@ -84,7 +84,29 @@ function resolvePriceLevelForCustomer(customerMatch, context) {
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
+    staff_followup_notes } = req.body;
+
+  // Reject orders that contain made-up qb_item_names. Without this, unresolvable
+  // line items pass through to QB with rate=0 and unknown FullName, causing QB
+  // to silently drop them so the customer never gets the materials they ordered.
+  const validation = validateItemsExist(items);
+  if (!validation.ok) {
+    log.logEvent({
+      event: 'order_rejected_invalid_items',
+      detail: {
+        customer_name, company_name, po_number,
+        invalid: validation.invalid,
+        suggestions: validation.suggestions,
+      },
+    });
+    return res.status(400).json({
+      error: 'Invalid items',
+      message: 'One or more line items do not match a known QuickBooks product. Use the parts search tool to find the exact catalog name, or move them to staff_followup_notes.',
+      invalid_items: validation.invalid,
+      suggestions: validation.suggestions,
+    });
+  }
 
   // Resolve customer: prefer an exact company-or-person match (needed for
   // accurate price level lookup), fall back to fuzzy match for display only.
@@ -130,11 +152,16 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   // Resolve combined system names into individual QB parts
   const resolvedItems = resolveOrderItems(items, priceLevel);
 
+  const baseMemo = memo || 'Phone order via Sophia AI';
+  const finalMemo = staff_followup_notes
+    ? `STAFF FOLLOWUP NEEDED: ${String(staff_followup_notes).trim()} | ${baseMemo}`
+    : baseMemo;
+
   const qbxml = templates.buildSalesOrderAdd({
     customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
-    memo: memo || 'Phone order via Sophia AI',
+    memo: finalMemo,
     items: resolvedItems.map((i) => ({
       name: i.name,
       description: i.description,
@@ -169,6 +196,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.customer_queue_id = customerQueueId;
   }
 
+  if (staff_followup_notes) {
+    response.staff_followup_recorded = true;
+  }
+
   res.status(202).json(response);
 });
 
@@ -176,7 +207,26 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
 
 router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
+    staff_followup_notes } = req.body;
+
+  const validation = validateItemsExist(items);
+  if (!validation.ok) {
+    log.logEvent({
+      event: 'invoice_rejected_invalid_items',
+      detail: {
+        customer_name, company_name, po_number,
+        invalid: validation.invalid,
+        suggestions: validation.suggestions,
+      },
+    });
+    return res.status(400).json({
+      error: 'Invalid items',
+      message: 'One or more line items do not match a known QuickBooks product. Use the parts search tool to find the exact catalog name, or move them to staff_followup_notes.',
+      invalid_items: validation.invalid,
+      suggestions: validation.suggestions,
+    });
+  }
 
   // Same exact-first, fuzzy-fallback strategy as /api/order.
   let resolvedCustomerName = customer_name;
@@ -219,11 +269,16 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   // Resolve combined system names into individual QB parts
   const resolvedItems = resolveOrderItems(items, priceLevel);
 
+  const baseMemo = memo || 'Phone order via Sophia AI';
+  const finalMemo = staff_followup_notes
+    ? `STAFF FOLLOWUP NEEDED: ${String(staff_followup_notes).trim()} | ${baseMemo}`
+    : baseMemo;
+
   const qbxml = templates.buildInvoiceAdd({
     customerName: resolvedCustomerName,
     customerRef: customer_ref,
     poNumber: po_number,
-    memo: memo || 'Phone order via Sophia AI',
+    memo: finalMemo,
     items: resolvedItems.map((i) => ({
       name: i.name,
       description: i.description,
@@ -336,6 +391,35 @@ router.post('/inventory/add', validate(validateInventoryAddPayload), (req, res) 
   }
 
   res.status(202).json(response);
+});
+
+// ─── GET /api/parts/search — Material/parts/supplies catalog lookup ─
+//
+// Returns inventory_cache items NOT covered by pricing_metadata (so this
+// surface is the "everything except heat pumps / heat kits / etc." catalog).
+// Used by the Retell `lookup_part` tool so Sophia can quote real materials
+// (mastic, flex, line sets, accessories...) instead of fabricating QB names.
+
+router.get('/parts/search', (req, res) => {
+  const q = (req.query.q || req.query.query || '').toString().trim();
+  if (!q) {
+    return res.status(400).json({ error: 'Missing required query param `q`' });
+  }
+  const limit = Math.min(parseInt(req.query.limit, 10) || 25, 50);
+  const items = cache.searchParts(q, { limit });
+  res.json({
+    query: q,
+    count: items.length,
+    last_qb_sync: cache.getInventorySyncTime(),
+    items: items.map((i) => ({
+      qb_item_name: i.full_name || i.name,
+      name: i.name,
+      sku: i.sku,
+      description: i.description,
+      sales_price: i.sales_price,
+      qty_on_hand: i.qty_on_hand,
+    })),
+  });
 });
 
 // ─── GET /api/inventory — Full cached inventory ─────────────────

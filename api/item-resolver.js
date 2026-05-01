@@ -90,19 +90,38 @@ function resolveItem(itemName, priceLevel = null) {
 }
 
 /**
+ * Look up an inventory_cache row by `name` or `full_name` (case-insensitive).
+ * Used for direct QB items (parts, supplies, heat kits) that aren't system bundles
+ * managed via pricing_metadata.
+ */
+function resolveInventoryDirect(itemName, priceLevel = null) {
+  const db = getDb();
+
+  const ic = db.prepare(`
+    SELECT name, full_name, sales_price, qty_on_hand FROM inventory_cache
+    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    LIMIT 1
+  `).get(itemName, itemName);
+
+  if (!ic) return null;
+
+  const fullName = ic.full_name || ic.name;
+  return { name: fullName, sales_price: ic.sales_price };
+}
+
+/**
  * Process an array of order items, expanding combined system names
  * into individual QB parts where possible.
  *
- * Items that can't be resolved (no QB match) pass through unchanged —
- * their `rate` is trusted as-is (e.g. Sophia already sent the adjusted price
- * from the pricing tool response, so re-applying the level would double-count).
- *
- * Split components whose rate is pulled from inventory_cache DO get adjusted
- * via the price level, since Sophia's caller rate is ignored there.
+ * Resolution order per item:
+ *   1. pricing_metadata system bundle → expand into outdoor + indoor parts
+ *   2. direct inventory_cache match (real QB FullName like "Mastic:White Mastic …")
+ *      → swap to canonical full_name, trust caller-supplied rate
+ *   3. otherwise → unresolved (validateItemsExist will already have rejected it)
  *
  * @param {Array} items - Order items [{name, description, qty, rate}]
- * @param {object} [priceLevel] - Cached price level (from cache.getPriceLevelByListId)
- * @returns {Array} Resolved items with individual QB parts
+ * @param {object} [priceLevel] - Cached price level
+ * @returns {Array} Resolved items
  */
 function resolveOrderItems(items, priceLevel = null) {
   const resolved = [];
@@ -111,7 +130,6 @@ function resolveOrderItems(items, priceLevel = null) {
     const expansion = resolveItem(item.name, priceLevel);
 
     if (expansion && expansion.parts.length > 0) {
-      // Expand into individual QB parts
       for (const part of expansion.parts) {
         resolved.push({
           name: part.name,
@@ -120,14 +138,69 @@ function resolveOrderItems(items, priceLevel = null) {
           rate: part.rate,
         });
       }
-    } else {
-      // Pass through unchanged — item either isn't in our metadata
-      // or doesn't have QB matches (AC units, warranty, etc.)
-      resolved.push(item);
+      continue;
     }
+
+    const direct = resolveInventoryDirect(item.name, priceLevel);
+    if (direct) {
+      resolved.push({
+        name: direct.name,
+        description: item.description,
+        qty: item.qty || 1,
+        rate: item.rate != null ? item.rate : direct.sales_price,
+      });
+      continue;
+    }
+
+    // Pass-through fallback — should be unreachable when route-level
+    // validateItemsExist runs first, but keeps behaviour safe in tests.
+    resolved.push(item);
   }
 
   return resolved;
 }
 
-module.exports = { resolveItem, resolveOrderItems };
+/**
+ * Validate that every supplied item name resolves to either a pricing_metadata
+ * row or an inventory_cache row. Returns { ok, invalid: [names], suggestions: {name: [...]}}.
+ */
+function validateItemsExist(items) {
+  const db = getDb();
+  const invalid = [];
+  const suggestions = {};
+
+  const stmtPm = db.prepare(`
+    SELECT 1 FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE LIMIT 1
+  `);
+  const stmtIc = db.prepare(`
+    SELECT 1 FROM inventory_cache
+    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    LIMIT 1
+  `);
+  const stmtFuzzy = db.prepare(`
+    SELECT name, full_name, sales_price FROM inventory_cache
+    WHERE is_active = 1 AND (name LIKE ? COLLATE NOCASE OR full_name LIKE ? COLLATE NOCASE)
+    ORDER BY CASE WHEN qty_on_hand > 0 THEN 0 ELSE 1 END, name COLLATE NOCASE
+    LIMIT 5
+  `);
+
+  for (const item of items || []) {
+    const name = item && item.name;
+    if (!name) continue;
+    if (stmtPm.get(name)) continue;
+    if (stmtIc.get(name, name)) continue;
+    invalid.push(name);
+    const pattern = `%${name.replace(/[%_]/g, '')}%`;
+    const matches = stmtFuzzy.all(pattern, pattern);
+    if (matches.length > 0) {
+      suggestions[name] = matches.map((m) => ({
+        full_name: m.full_name || m.name,
+        sales_price: m.sales_price,
+      }));
+    }
+  }
+
+  return { ok: invalid.length === 0, invalid, suggestions };
+}
+
+module.exports = { resolveItem, resolveOrderItems, resolveInventoryDirect, validateItemsExist };

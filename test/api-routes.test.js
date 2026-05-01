@@ -60,6 +60,10 @@ describe('REST API routes', () => {
   // ─── POST /api/order ────────────────────────────────────────
 
   it('POST /api/order returns 202 with valid payload', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      sku: 'WA-100', salesPrice: 10, qtyOnHand: 50, isActive: true,
+    });
     const res = await makeRequest(port, 'POST', '/api/order', {
       headers: { 'x-api-key': API_KEY },
       body: {
@@ -70,6 +74,35 @@ describe('REST API routes', () => {
     assert.equal(res.statusCode, 202);
     assert.equal(res.body.status, 'queued');
     assert.ok(res.body.queue_id);
+  });
+
+  it('POST /api/order returns 400 with invalid item names', async () => {
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [{ name: 'Hallucinated SKU', qty: 1, rate: 0 }],
+      },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.error, 'Invalid items');
+    assert.deepEqual(res.body.invalid_items, ['Hallucinated SKU']);
+  });
+
+  it('POST /api/order accepts staff_followup_notes', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A', salesPrice: 10, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [{ name: 'Widget A', qty: 1, rate: 10 }],
+        staff_followup_notes: '1 SST float switch (not in catalog)',
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.staff_followup_recorded, true);
   });
 
   it('POST /api/order returns 400 with missing customer_name', async () => {
@@ -92,6 +125,9 @@ describe('REST API routes', () => {
   // ─── POST /api/invoice ──────────────────────────────────────
 
   it('POST /api/invoice returns 202 with valid payload', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SVC', name: 'Service B', fullName: 'Service B', salesPrice: 150, isActive: true,
+    });
     const res = await makeRequest(port, 'POST', '/api/invoice', {
       headers: { 'x-api-key': API_KEY },
       body: {
@@ -101,6 +137,30 @@ describe('REST API routes', () => {
     });
     assert.equal(res.statusCode, 202);
     assert.equal(res.body.status, 'queued');
+  });
+
+  // ─── GET /api/parts/search ──────────────────────────────────
+
+  it('GET /api/parts/search returns 400 without q', async () => {
+    const res = await makeRequest(port, 'GET', '/api/parts/search', {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(res.statusCode, 400);
+  });
+
+  it('GET /api/parts/search returns matching plain inventory items', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-MASTIC', name: 'Mastic 1G', fullName: 'Mastic:White Mastic 1 Gallon',
+      salesPrice: 19.75, qtyOnHand: 100, isActive: true,
+    });
+
+    const res = await makeRequest(port, 'GET', '/api/parts/search?q=mastic', {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.count, 1);
+    assert.equal(res.body.items[0].qb_item_name, 'Mastic:White Mastic 1 Gallon');
+    assert.equal(res.body.items[0].sales_price, 19.75);
   });
 
   // ─── POST /api/query ────────────────────────────────────────

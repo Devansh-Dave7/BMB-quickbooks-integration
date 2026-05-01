@@ -165,19 +165,6 @@ function searchParts(query, { limit = 25 } = {}) {
   if (tokens.length === 0) return [];
 
   const params = [];
-  const tokenClauses = tokens.map((tok) => {
-    const pat = `%${tok}%`;
-    params.push(pat, pat, pat, pat);
-    return '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)';
-  });
-
-  // Score = number of tokens that hit ic.name (highest-signal field)
-  const scoreParts = tokens.map(() => {
-    params.push(`%${tokens[0]}%`); // placeholder — we override per-token below
-    return null;
-  });
-  // Build per-token score expressions inline; reset params for clarity.
-  params.length = 0;
   const tokenWhere = [];
   const tokenScore = [];
   for (const tok of tokens) {

@@ -128,23 +128,77 @@ function inventoryItemExists(nameOrFullName) {
 }
 
 /**
+ * Tokenize a search query for parts lookup. Drops noise words and unit markers
+ * Sophia might add ("inch", "inches", "the") and treats `4"` as just `4`.
+ */
+const PARTS_NOISE_TOKENS = new Set([
+  'a', 'an', 'the', 'of', 'and', 'or', 'with',
+  'inch', 'inches', 'in', 'foot', 'feet', 'ft', 'pcs', 'pc', 'each', 'ea',
+  'piece', 'pieces', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
+  'bucket', 'buckets', 'gal', 'gallon', 'gallons',
+]);
+
+function tokenizePartsQuery(query) {
+  if (!query) return [];
+  return String(query)
+    .toLowerCase()
+    .replace(/["']/g, ' ')
+    .replace(/[^a-z0-9/.-]+/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t && !PARTS_NOISE_TOKENS.has(t));
+}
+
+/**
  * Search inventory for parts/materials/supplies. Excludes items that are managed
  * via pricing_metadata (system bundles, system outdoor/indoor components, heat
  * kits, package units) so the result is the catalog of plain QB items the
  * pricing tools don't already cover.
+ *
+ * Behaviour: tokenize the query, require EVERY token to match in any of
+ * name / full_name / sku / description (AND across tokens, OR across fields).
+ * Rank: items whose `name` matches more tokens come first; in-stock above
+ * out-of-stock; alphabetical as final tiebreaker.
  */
 function searchParts(query, { limit = 25 } = {}) {
   const db = getDb();
-  const pattern = `%${query}%`;
+  const tokens = tokenizePartsQuery(query);
+  if (tokens.length === 0) return [];
+
+  const params = [];
+  const tokenClauses = tokens.map((tok) => {
+    const pat = `%${tok}%`;
+    params.push(pat, pat, pat, pat);
+    return '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)';
+  });
+
+  // Score = number of tokens that hit ic.name (highest-signal field)
+  const scoreParts = tokens.map(() => {
+    params.push(`%${tokens[0]}%`); // placeholder — we override per-token below
+    return null;
+  });
+  // Build per-token score expressions inline; reset params for clarity.
+  params.length = 0;
+  const tokenWhere = [];
+  const tokenScore = [];
+  for (const tok of tokens) {
+    const pat = `%${tok}%`;
+    params.push(pat, pat, pat, pat);
+    tokenWhere.push(
+      '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)'
+    );
+    params.push(pat);
+    tokenScore.push('(CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)');
+  }
+
+  params.push(parseInt(limit, 10) || 25);
+
   return db.prepare(`
     SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,
-           ic.qty_on_hand, ic.sales_price, ic.synced_at
+           ic.qty_on_hand, ic.sales_price, ic.synced_at,
+           (${tokenScore.join(' + ')}) AS name_hits
     FROM inventory_cache ic
     WHERE ic.is_active = 1
-      AND (ic.name LIKE ? COLLATE NOCASE
-           OR ic.sku LIKE ? COLLATE NOCASE
-           OR ic.full_name LIKE ? COLLATE NOCASE
-           OR ic.description LIKE ? COLLATE NOCASE)
+      AND ${tokenWhere.join(' AND ')}
       AND NOT EXISTS (
         SELECT 1 FROM pricing_metadata pm
         WHERE pm.qb_item_name = ic.name COLLATE NOCASE
@@ -152,10 +206,11 @@ function searchParts(query, { limit = 25 } = {}) {
            OR pm.indoor_model  = ic.name COLLATE NOCASE
       )
     ORDER BY
+      name_hits DESC,
       CASE WHEN ic.qty_on_hand > 0 THEN 0 ELSE 1 END,
       ic.name COLLATE NOCASE
     LIMIT ?
-  `).all(pattern, pattern, pattern, pattern, parseInt(limit, 10) || 25);
+  `).all(...params);
 }
 
 /**

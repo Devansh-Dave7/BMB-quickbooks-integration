@@ -254,31 +254,16 @@ function searchParts(query, { limit = 25 } = {}) {
   // Nothing matched and no category hint — caller's words don't help us.
   if (tokens.length === 0 && categories.length === 0) return [];
 
-  const params = [];
-
-  // Category filter — OR across detected aliases.
-  let categoryClause = '';
-  if (categories.length > 0) {
-    const ors = categories.map((cat) => {
-      // Plain LIKE prefix match against full_name. We don't escape the `&` in
-      // "Drain Pans&Accessories:" — SQLite LIKE has no special meaning for &.
-      params.push(`${cat}%`);
-      return 'ic.full_name LIKE ? COLLATE NOCASE';
-    });
-    categoryClause = `AND (${ors.join(' OR ')})`;
-  }
-
-  // Token AND-match across all four fields, plus per-field score.
-  // Weights: full_name=4 (most signal), name=3, sku=2, description=1.
-  const tokenWhere = [];
+  // Build SQL fragments first; collect params in three buckets so we can
+  // push them in the order the placeholders actually appear in the final
+  // SQL text (SELECT first, then WHERE category, then WHERE token, then
+  // LIMIT). Mismatched ordering silently scrambles bindings — that bug
+  // bit us once already.
+  const scoreParams = [];
   const tokenScore = [];
   for (const tok of tokens) {
     const pat = `%${tok}%`;
-    params.push(pat, pat, pat, pat);
-    tokenWhere.push(
-      '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)'
-    );
-    params.push(pat, pat, pat, pat);
+    scoreParams.push(pat, pat, pat, pat);
     tokenScore.push(
       '(CASE WHEN ic.full_name LIKE ? COLLATE NOCASE THEN 4 ELSE 0 END' +
       ' + CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 3 ELSE 0 END' +
@@ -286,10 +271,35 @@ function searchParts(query, { limit = 25 } = {}) {
       ' + CASE WHEN ic.description LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)'
     );
   }
-  const tokenWhereClause = tokenWhere.length > 0 ? `AND ${tokenWhere.join(' AND ')}` : '';
   const scoreExpr = tokenScore.length > 0 ? tokenScore.join(' + ') : '0';
 
-  params.push(parseInt(limit, 10) || 25);
+  const categoryParams = [];
+  let categoryClause = '';
+  if (categories.length > 0) {
+    const ors = categories.map((cat) => {
+      categoryParams.push(`${cat}%`);
+      return 'ic.full_name LIKE ? COLLATE NOCASE';
+    });
+    categoryClause = `AND (${ors.join(' OR ')})`;
+  }
+
+  const tokenWhereParams = [];
+  const tokenWhere = [];
+  for (const tok of tokens) {
+    const pat = `%${tok}%`;
+    tokenWhereParams.push(pat, pat, pat, pat);
+    tokenWhere.push(
+      '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)'
+    );
+  }
+  const tokenWhereClause = tokenWhere.length > 0 ? `AND ${tokenWhere.join(' AND ')}` : '';
+
+  const params = [
+    ...scoreParams,
+    ...categoryParams,
+    ...tokenWhereParams,
+    parseInt(limit, 10) || 25,
+  ];
 
   return db.prepare(`
     SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,

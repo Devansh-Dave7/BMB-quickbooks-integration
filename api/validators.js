@@ -13,11 +13,18 @@ function validateOrderPayload(body) {
   }
 
   if (!Array.isArray(body.items) || body.items.length === 0) {
-    errors.push('items must be a non-empty array');
+    errors.push(
+      'items[] is empty — call lookup_part for each material the caller mentioned, ' +
+      'put the qb_item_name from each [QB_DATA] block into items[], and resubmit. ' +
+      'Anything still unmatched goes into staff_followup_notes.'
+    );
   } else {
     body.items.forEach((item, i) => {
       if (!item.name || typeof item.name !== 'string') {
-        errors.push(`items[${i}].name is required and must be a string`);
+        errors.push(
+          `items[${i}].name is missing — every item needs a qb_item_name copied verbatim ` +
+          `from a [QB_DATA] block returned by a pricing tool or lookup_part.`
+        );
       }
       if (item.qty != null && (typeof item.qty !== 'number' || item.qty <= 0)) {
         errors.push(`items[${i}].qty must be a positive number`);

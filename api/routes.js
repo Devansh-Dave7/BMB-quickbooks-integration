@@ -6,7 +6,7 @@ const cache = require('../db/cache');
 const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
-const { resolveOrderItems, validateItemsExist } = require('./item-resolver');
+const { resolveOrderItems, validateItemsExist, formatFollowupLine } = require('./item-resolver');
 
 const router = express.Router();
 
@@ -84,27 +84,49 @@ function resolvePriceLevelForCustomer(customerMatch, context) {
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
-    staff_followup_notes } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+  let { staff_followup_notes } = req.body;
 
-  // Reject orders that contain made-up qb_item_names. Without this, unresolvable
-  // line items pass through to QB with rate=0 and unknown FullName, causing QB
-  // to silently drop them so the customer never gets the materials they ordered.
+  // Auto-promote unknown line items into staff_followup_notes instead of
+  // refusing the whole order. Sophia hallucinates qb_item_names with an
+  // "Accessory:" prefix when she skips lookup_part; this rescue path means
+  // the heat pump + heat kit still land on the QB ticket and the materials
+  // appear in the memo for staff to confirm and bill separately.
+  // We still reject if EVERY item is unknown — there's nothing to bill.
   const validation = validateItemsExist(items);
+  let autoFollowupItems = [];
+  let validatedItems = items;
   if (!validation.ok) {
+    if (validation.valid.length === 0) {
+      log.logEvent({
+        event: 'order_rejected_no_valid_items',
+        detail: {
+          customer_name, company_name, po_number,
+          invalid: validation.invalid_names,
+          suggestions: validation.suggestions,
+        },
+      });
+      return res.status(400).json({
+        error: 'Invalid items',
+        message: 'No line items matched a known QuickBooks product. Use the lookup_part tool to find catalog names, or move them all to staff_followup_notes.',
+        invalid_items: validation.invalid_names,
+        suggestions: validation.suggestions,
+      });
+    }
+    validatedItems = validation.valid;
+    autoFollowupItems = validation.invalid_names;
+    const promotedLines = validation.invalid.map(formatFollowupLine).join('; ');
+    staff_followup_notes = staff_followup_notes
+      ? `${String(staff_followup_notes).trim()}; ${promotedLines}`
+      : promotedLines;
     log.logEvent({
-      event: 'order_rejected_invalid_items',
+      event: 'order_auto_promoted_invalid_items',
       detail: {
         customer_name, company_name, po_number,
-        invalid: validation.invalid,
+        promoted: validation.invalid_names,
         suggestions: validation.suggestions,
+        valid_count: validation.valid.length,
       },
-    });
-    return res.status(400).json({
-      error: 'Invalid items',
-      message: 'One or more line items do not match a known QuickBooks product. Use the parts search tool to find the exact catalog name, or move them to staff_followup_notes.',
-      invalid_items: validation.invalid,
-      suggestions: validation.suggestions,
     });
   }
 
@@ -150,7 +172,7 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   }
 
   // Resolve combined system names into individual QB parts
-  const resolvedItems = resolveOrderItems(items, priceLevel);
+  const resolvedItems = resolveOrderItems(validatedItems, priceLevel);
 
   const baseMemo = memo || 'Phone order via Sophia AI';
   const finalMemo = staff_followup_notes
@@ -200,6 +222,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.staff_followup_recorded = true;
   }
 
+  if (autoFollowupItems.length > 0) {
+    response.auto_followup_items = autoFollowupItems;
+  }
+
   res.status(202).json(response);
 });
 
@@ -207,24 +233,44 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
 
 router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
-    staff_followup_notes } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+  let { staff_followup_notes } = req.body;
 
+  // Same auto-promote behaviour as /api/order — see commentary there.
   const validation = validateItemsExist(items);
+  let autoFollowupItems = [];
+  let validatedItems = items;
   if (!validation.ok) {
+    if (validation.valid.length === 0) {
+      log.logEvent({
+        event: 'invoice_rejected_no_valid_items',
+        detail: {
+          customer_name, company_name, po_number,
+          invalid: validation.invalid_names,
+          suggestions: validation.suggestions,
+        },
+      });
+      return res.status(400).json({
+        error: 'Invalid items',
+        message: 'No line items matched a known QuickBooks product. Use the lookup_part tool to find catalog names, or move them all to staff_followup_notes.',
+        invalid_items: validation.invalid_names,
+        suggestions: validation.suggestions,
+      });
+    }
+    validatedItems = validation.valid;
+    autoFollowupItems = validation.invalid_names;
+    const promotedLines = validation.invalid.map(formatFollowupLine).join('; ');
+    staff_followup_notes = staff_followup_notes
+      ? `${String(staff_followup_notes).trim()}; ${promotedLines}`
+      : promotedLines;
     log.logEvent({
-      event: 'invoice_rejected_invalid_items',
+      event: 'invoice_auto_promoted_invalid_items',
       detail: {
         customer_name, company_name, po_number,
-        invalid: validation.invalid,
+        promoted: validation.invalid_names,
         suggestions: validation.suggestions,
+        valid_count: validation.valid.length,
       },
-    });
-    return res.status(400).json({
-      error: 'Invalid items',
-      message: 'One or more line items do not match a known QuickBooks product. Use the parts search tool to find the exact catalog name, or move them to staff_followup_notes.',
-      invalid_items: validation.invalid,
-      suggestions: validation.suggestions,
     });
   }
 
@@ -267,7 +313,7 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   }
 
   // Resolve combined system names into individual QB parts
-  const resolvedItems = resolveOrderItems(items, priceLevel);
+  const resolvedItems = resolveOrderItems(validatedItems, priceLevel);
 
   const baseMemo = memo || 'Phone order via Sophia AI';
   const finalMemo = staff_followup_notes
@@ -310,6 +356,14 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   if (customerQueueId) {
     invoiceResponse.auto_customer_queued = true;
     invoiceResponse.customer_queue_id = customerQueueId;
+  }
+
+  if (staff_followup_notes) {
+    invoiceResponse.staff_followup_recorded = true;
+  }
+
+  if (autoFollowupItems.length > 0) {
+    invoiceResponse.auto_followup_items = autoFollowupItems;
   }
 
   res.status(202).json(invoiceResponse);

@@ -76,7 +76,7 @@ describe('REST API routes', () => {
     assert.ok(res.body.queue_id);
   });
 
-  it('POST /api/order returns 400 with invalid item names', async () => {
+  it('POST /api/order returns 400 only when ALL items are invalid', async () => {
     const res = await makeRequest(port, 'POST', '/api/order', {
       headers: { 'x-api-key': API_KEY },
       body: {
@@ -87,6 +87,32 @@ describe('REST API routes', () => {
     assert.equal(res.statusCode, 400);
     assert.equal(res.body.error, 'Invalid items');
     assert.deepEqual(res.body.invalid_items, ['Hallucinated SKU']);
+  });
+
+  it('POST /api/order auto-promotes unknown items into staff_followup_notes when at least one item is valid', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, qtyOnHand: 50, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        po_number: 'AUTO-PROMO',
+        items: [
+          { name: 'Widget A', qty: 1, rate: 10 },
+          { name: 'Accessory: 4" Silver Flex Bag', qty: 2, rate: 0 },
+          { name: 'Accessory: SS2', qty: 1, rate: 0 },
+        ],
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.status, 'queued');
+    assert.equal(res.body.staff_followup_recorded, true);
+    assert.deepEqual(
+      res.body.auto_followup_items,
+      ['Accessory: 4" Silver Flex Bag', 'Accessory: SS2'],
+    );
   });
 
   it('POST /api/order accepts staff_followup_notes', async () => {

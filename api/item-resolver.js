@@ -161,12 +161,18 @@ function resolveOrderItems(items, priceLevel = null) {
 }
 
 /**
- * Validate that every supplied item name resolves to either a pricing_metadata
- * row or an inventory_cache row. Returns { ok, invalid: [names], suggestions: {name: [...]}}.
+ * Partition supplied items into those that match a known QB product and those
+ * that don't. Unknown items are returned with their full payload so callers
+ * can promote them to staff_followup_notes for human review.
+ *
+ * Returns { ok, valid: [items], invalid: [items], invalid_names: [], suggestions: {name: [...]}}.
+ * `ok` is true iff every item matched.
  */
 function validateItemsExist(items) {
   const db = getDb();
+  const valid = [];
   const invalid = [];
+  const invalidNames = [];
   const suggestions = {};
 
   const stmtPm = db.prepare(`
@@ -187,9 +193,12 @@ function validateItemsExist(items) {
   for (const item of items || []) {
     const name = item && item.name;
     if (!name) continue;
-    if (stmtPm.get(name)) continue;
-    if (stmtIc.get(name, name)) continue;
-    invalid.push(name);
+    if (stmtPm.get(name) || stmtIc.get(name, name)) {
+      valid.push(item);
+      continue;
+    }
+    invalid.push(item);
+    invalidNames.push(name);
     const pattern = `%${name.replace(/[%_]/g, '')}%`;
     const matches = stmtFuzzy.all(pattern, pattern);
     if (matches.length > 0) {
@@ -200,7 +209,24 @@ function validateItemsExist(items) {
     }
   }
 
-  return { ok: invalid.length === 0, invalid, suggestions };
+  return { ok: invalid.length === 0, valid, invalid, invalid_names: invalidNames, suggestions };
 }
 
-module.exports = { resolveItem, resolveOrderItems, resolveInventoryDirect, validateItemsExist };
+/**
+ * Format an unmatched line item into a single human-readable bullet for the
+ * staff_followup_notes memo. Strips the "Accessory:" prefix Sophia sometimes
+ * fabricates and includes the quantity so staff know how many to bill.
+ */
+function formatFollowupLine(item) {
+  const raw = String((item && item.name) || '').replace(/^accessory:\s*/i, '').trim();
+  const qty = Number(item && item.qty) || 1;
+  return `${qty}x ${raw} (caller's wording, not in catalog)`;
+}
+
+module.exports = {
+  resolveItem,
+  resolveOrderItems,
+  resolveInventoryDirect,
+  validateItemsExist,
+  formatFollowupLine,
+};

@@ -136,6 +136,7 @@ const PARTS_NOISE_TOKENS = new Set([
   'inch', 'inches', 'in', 'foot', 'feet', 'ft', 'pcs', 'pc', 'each', 'ea',
   'piece', 'pieces', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
   'pack', 'packs',
+  'stick', 'sticks', 'joint', 'joints', 'roll', 'rolls',  // length-units, low signal
   'want', 'need', 'please', 'add', 'get', 'put',
 ]);
 // Note: 'bucket'/'gallon' are intentionally NOT noise — for mastic,
@@ -187,7 +188,7 @@ const BMB_PARTS_ALIASES = [
   { pat: /\bdrain\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
   { pat: /\bhurricane\s+pad/gi, category: 'Condenser Pads:Hurricane', removeMatch: true },
   { pat: /\bcondenser\s+pad/gi, category: 'Condenser Pads:', removeMatch: true },
-  { pat: /\bpad\s+bracket/gi, category: 'Condenser Pads:Cond Pad Bracket', removeMatch: true },
+  { pat: /\b(pad\s+bracket|hurricane\s+bracket|cond\s+pad\s+bracket)\b/gi, category: 'Condenser Pads:Cond Pad', removeMatch: true },
   // Copper rolls.
   { pat: /\b(rolled\s+copper|copper\s+roll|copper\s+coil)\b/gi, category: 'Copper:Rolls:', removeMatch: true },
   // PVC.
@@ -226,9 +227,11 @@ function normalizePartsQuery(query) {
   // Dimension separators: callers say "8x4x4 boot" but the QB item is
   // "B 8x4-4". Normalise both `x` and `-` between digits to spaces so each
   // dimension becomes its own token; AND-matching across "8", "4", "4"
-  // still hits the right boot.
-  q = q.replace(/(\d)\s*[xX]\s*(\d)/g, '$1 $2');
-  q = q.replace(/(\d)\s*-\s*(\d)/g, '$1 $2');
+  // still hits the right boot. Use lookbehind + lookahead so the digits
+  // themselves are not consumed (otherwise "8x4x4" only splits the first
+  // pair and leaves "4x4" stuck together).
+  q = q.replace(/(?<=\d)\s*[xX]\s*(?=\d)/g, ' ');
+  q = q.replace(/(?<=\d)\s*-\s*(?=\d)/g, ' ');
   // Apply aliases (each pat is /gi so we can replace globally).
   const categories = new Set();
   for (const alias of BMB_PARTS_ALIASES) {
@@ -321,18 +324,24 @@ function searchParts(query, { limit = 25 } = {}) {
     parseInt(limit, 10) || 25,
   ];
 
-  // Canonical SKU pattern boost: BMB's primary part SKUs follow a short,
-  // structured pattern (TC04, FTC04, ST04, SLV04, AE04, DP3060, B 8x4-4,
-  // ECB45-5-P, PHK05BP). Specialty/decoy variants (DSO, Spin in, Mobile home,
-  // Brush, Spray Adhesive variants) have longer descriptive names. Within a
-  // category these canonical SKUs are usually what the caller actually means,
-  // so give them a +5 score boost. The regex is intentionally conservative:
-  // an alpha prefix (1-3 letters) followed immediately by digits, optionally
-  // followed by a single suffix segment.
-  const skuBoost = "(CASE WHEN ic.name GLOB '[A-Z][A-Z]*[0-9]*' " +
-                   "OR ic.name GLOB '[A-Z] [0-9]*x[0-9]*-[0-9]*' " +
-                   "OR ic.name GLOB '[A-Z][0-9]*x[0-9]*-[0-9]*' " +
-                   "THEN 5 ELSE 0 END)";
+  // Canonical SKU boost. BMB's primary part SKUs follow a short structured
+  // pattern (TC04, FTC04, ST04, SLV04, AE06, DP3060) — typically ≤6 chars
+  // with no spaces. Specialty / decoy variants (Brush 2", AE04 26GA, Mobile
+  // Home Flex, DSO 04, Hurricane Attachment Bracket) carry trailing
+  // adjectives or grade codes after a space, so they are longer. The earlier
+  // GLOB-based attempt didn't work because SQLite GLOB has no regex
+  // repetition — `[A-Z]*` parses as "one uppercase + any". Use a positive
+  // length+space heuristic instead, plus a separate boot pattern for the
+  // hyphenated boot names (e.g. "B 8x4-4").
+  const skuBoost =
+    "(CASE WHEN (length(ic.name) <= 6 AND ic.name NOT LIKE '% %') " +
+    "       OR ic.name GLOB 'B ?x?-?' " +
+    "       OR ic.name GLOB 'B ?x?-??' " +
+    "       OR ic.name GLOB 'B ??x?-?' " +
+    "       OR ic.name GLOB 'B ??x?-??' " +
+    "       OR ic.name GLOB 'B??x?-?' " +
+    "       OR ic.name GLOB 'B??x?-??' " +
+    "  THEN 5 ELSE 0 END)";
 
   return db.prepare(`
     SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,
@@ -352,6 +361,7 @@ function searchParts(query, { limit = 25 } = {}) {
     ORDER BY
       (match_score + sku_boost) DESC,
       CASE WHEN ic.qty_on_hand > 0 THEN 0 ELSE 1 END,
+      length(ic.name) ASC,
       ic.full_name COLLATE NOCASE,
       ic.name COLLATE NOCASE
     LIMIT ?

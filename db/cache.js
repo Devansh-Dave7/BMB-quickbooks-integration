@@ -132,11 +132,98 @@ function inventoryItemExists(nameOrFullName) {
  * Sophia might add ("inch", "inches", "the") and treats `4"` as just `4`.
  */
 const PARTS_NOISE_TOKENS = new Set([
-  'a', 'an', 'the', 'of', 'and', 'or', 'with',
+  'a', 'an', 'the', 'of', 'and', 'or', 'with', 'for', 'to',
   'inch', 'inches', 'in', 'foot', 'feet', 'ft', 'pcs', 'pc', 'each', 'ea',
   'piece', 'pieces', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
-  'bucket', 'buckets', 'gal', 'gallon', 'gallons',
+  'bucket', 'buckets', 'gal', 'gallon', 'gallons', 'pack', 'packs',
+  'want', 'need', 'please', 'add', 'get', 'put',
 ]);
+
+const PARTS_NUMBER_WORDS = {
+  one: '1', two: '2', three: '3', four: '4', five: '5', six: '6',
+  seven: '7', eight: '8', nine: '9', ten: '10',
+  eleven: '11', twelve: '12', thirteen: '13', fourteen: '14',
+  fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18',
+  nineteen: '19', twenty: '20',
+};
+
+/**
+ * BMB-specific aliases: caller jargon → canonical QB category (full_name prefix)
+ * and/or canonical tokens. Built from Lewis's 2026-04-17 material list and the
+ * 2026-05-04 call transcript. Each entry:
+ *   pat:        regex with /gi
+ *   category:   full_name LIKE prefix (escaped) — restricts the search
+ *   removeMatch: drop the matched substring from the query so unrelated
+ *                tokens don't dilute the match
+ *   addTokens:  extra canonical tokens to AND into the search
+ */
+const BMB_PARTS_ALIASES = [
+  // Float switch — many caller phrasings, all map to one QB item.
+  { pat: /\b(s\s*\.?\s*s\s*\.?\s*2|s\s*\.?\s*s\s*\.?\s*two|sst?\s+float\s+switch|float\s+switch|safety\s+switch|drain\s+switch)\b/gi,
+    category: 'Drain Pans&Accessories:SS2', removeMatch: true },
+  // Silver flex / KM R6 bag → Flex:SLV* category.
+  { pat: /\bsilver\s+flex(?:\s+bag)?\b/gi,
+    category: 'Flex:SLV', removeMatch: true },
+  { pat: /\b(km\s+bag|km\s+r6|r6\s+bag)\b/gi,
+    category: 'Flex:SLV', removeMatch: true },
+  // "silver" alone (when paired with flex elsewhere in query) — drop it; it's
+  // not in any QB field for the SLV product.
+  { pat: /\bsilver\b/gi, removeMatch: true },
+  // Tab / flat tap / saddle tap collars — distinct categories.
+  { pat: /\bflat\s+tap(?:\s+collar)?/gi, category: 'Flat Tap Collar:', removeMatch: true },
+  { pat: /\bsaddle\s+tap/gi, category: 'Saddle Taps:', removeMatch: true },
+  { pat: /\btab\s+collar/gi, category: 'Tab Collars:', removeMatch: true },
+  // Drain pans + hurricane condenser pads.
+  { pat: /\bdrain\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
+  { pat: /\bhurricane\s+pad/gi, category: 'Condenser Pads:Hurricane', removeMatch: true },
+  { pat: /\bcondenser\s+pad/gi, category: 'Condenser Pads:', removeMatch: true },
+  { pat: /\bpad\s+bracket/gi, category: 'Condenser Pads:Cond Pad Bracket', removeMatch: true },
+  // Copper rolls.
+  { pat: /\b(rolled\s+copper|copper\s+roll|copper\s+coil)\b/gi, category: 'Copper:Rolls:', removeMatch: true },
+  // PVC.
+  { pat: /\bpvc\b/gi, category: 'PVC:', removeMatch: true },
+  // Boots.
+  { pat: /\b(metal\s+top\s+boot|metal\s+boot)\b/gi, category: 'Boots:B', removeMatch: true },
+  { pat: /\bboot\b/gi, category: 'Boots:', removeMatch: true },
+  // Mastic + brushes.
+  { pat: /\bmastic\b/gi, category: 'Mastic:', removeMatch: true },
+  // Spray adhesive.
+  { pat: /\bspray\s+adhesive/gi, category: 'Spray Adhesive', removeMatch: true },
+  // Panduit straps.
+  { pat: /\bpanduit(?:\s+strap)?/gi, category: 'Panduit Straps', removeMatch: true },
+  // Tape.
+  { pat: /\b(duct\s+tape|fasson(?:\s+tape)?)\b/gi, category: 'Tape:', removeMatch: true },
+  // Adjustable elbows.
+  { pat: /\badjustable\s+elbow/gi, category: 'Adjustable elbows:', removeMatch: true },
+  // T-Fin aluminum flex duct (Builder's Best).
+  { pat: /\b(t[\s-]*fin|aluminum\s+flex(?:\s+duct)?)\b/gi, category: "Builder's Best:T-Fin", removeMatch: true },
+  // Air handler blocks (single item).
+  { pat: /\bair\s+handler\s+block/gi, category: 'Air handler block', removeMatch: true },
+];
+
+function normalizePartsQuery(query) {
+  if (!query) return { categories: [], rest: '' };
+  let q = String(query).toLowerCase();
+  // Spelled-out numbers → digits so '4 inch' and 'four inch' behave the same.
+  q = q.replace(
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/g,
+    (m) => PARTS_NUMBER_WORDS[m] || m
+  );
+  // Apply aliases (each pat is /gi so we can replace globally).
+  const categories = new Set();
+  for (const alias of BMB_PARTS_ALIASES) {
+    alias.pat.lastIndex = 0;
+    if (alias.pat.test(q)) {
+      if (alias.category) categories.add(alias.category);
+      if (alias.removeMatch) {
+        alias.pat.lastIndex = 0;
+        q = q.replace(alias.pat, ' ');
+      }
+    }
+    alias.pat.lastIndex = 0;
+  }
+  return { categories: Array.from(categories), rest: q };
+}
 
 function tokenizePartsQuery(query) {
   if (!query) return [];
@@ -161,10 +248,28 @@ function tokenizePartsQuery(query) {
  */
 function searchParts(query, { limit = 25 } = {}) {
   const db = getDb();
-  const tokens = tokenizePartsQuery(query);
-  if (tokens.length === 0) return [];
+  const { categories, rest } = normalizePartsQuery(query);
+  const tokens = tokenizePartsQuery(rest);
+
+  // Nothing matched and no category hint — caller's words don't help us.
+  if (tokens.length === 0 && categories.length === 0) return [];
 
   const params = [];
+
+  // Category filter — OR across detected aliases.
+  let categoryClause = '';
+  if (categories.length > 0) {
+    const ors = categories.map((cat) => {
+      // Plain LIKE prefix match against full_name. We don't escape the `&` in
+      // "Drain Pans&Accessories:" — SQLite LIKE has no special meaning for &.
+      params.push(`${cat}%`);
+      return 'ic.full_name LIKE ? COLLATE NOCASE';
+    });
+    categoryClause = `AND (${ors.join(' OR ')})`;
+  }
+
+  // Token AND-match across all four fields, plus per-field score.
+  // Weights: full_name=4 (most signal), name=3, sku=2, description=1.
   const tokenWhere = [];
   const tokenScore = [];
   for (const tok of tokens) {
@@ -173,19 +278,27 @@ function searchParts(query, { limit = 25 } = {}) {
     tokenWhere.push(
       '(ic.name LIKE ? COLLATE NOCASE OR ic.full_name LIKE ? COLLATE NOCASE OR ic.sku LIKE ? COLLATE NOCASE OR ic.description LIKE ? COLLATE NOCASE)'
     );
-    params.push(pat);
-    tokenScore.push('(CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)');
+    params.push(pat, pat, pat, pat);
+    tokenScore.push(
+      '(CASE WHEN ic.full_name LIKE ? COLLATE NOCASE THEN 4 ELSE 0 END' +
+      ' + CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 3 ELSE 0 END' +
+      ' + CASE WHEN ic.sku LIKE ? COLLATE NOCASE THEN 2 ELSE 0 END' +
+      ' + CASE WHEN ic.description LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)'
+    );
   }
+  const tokenWhereClause = tokenWhere.length > 0 ? `AND ${tokenWhere.join(' AND ')}` : '';
+  const scoreExpr = tokenScore.length > 0 ? tokenScore.join(' + ') : '0';
 
   params.push(parseInt(limit, 10) || 25);
 
   return db.prepare(`
     SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,
            ic.qty_on_hand, ic.sales_price, ic.synced_at,
-           (${tokenScore.join(' + ')}) AS name_hits
+           (${scoreExpr}) AS match_score
     FROM inventory_cache ic
     WHERE ic.is_active = 1
-      AND ${tokenWhere.join(' AND ')}
+      ${categoryClause}
+      ${tokenWhereClause}
       AND NOT EXISTS (
         SELECT 1 FROM pricing_metadata pm
         WHERE pm.qb_item_name = ic.name COLLATE NOCASE
@@ -193,8 +306,9 @@ function searchParts(query, { limit = 25 } = {}) {
            OR pm.indoor_model  = ic.name COLLATE NOCASE
       )
     ORDER BY
-      name_hits DESC,
+      match_score DESC,
       CASE WHEN ic.qty_on_hand > 0 THEN 0 ELSE 1 END,
+      ic.full_name COLLATE NOCASE,
       ic.name COLLATE NOCASE
     LIMIT ?
   `).all(...params);

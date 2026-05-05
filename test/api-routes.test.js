@@ -163,6 +163,68 @@ describe('REST API routes', () => {
     assert.equal(res.body.items[0].sales_price, 19.75);
   });
 
+  it('GET /api/parts/search resolves BMB caller jargon (silver flex → Flex:SLV)', async () => {
+    // KM R6 SLV bag — Lewis calls these "silver flex". Description has no "silver".
+    cache.upsertInventoryItem({
+      listId: 'LID-SLV04', name: 'SLV04', fullName: 'Flex:SLV04',
+      description: '4" KM R6 Bag 120/Pallet 30/Bundle',
+      salesPrice: 32.5, qtyOnHand: 50, isActive: true,
+    });
+    // Distractor: Black Flex item that doesn't share the SLV category.
+    cache.upsertInventoryItem({
+      listId: 'LID-BFL', name: 'Black Flex 4"', fullName: 'Flex:Black Flex 4"',
+      salesPrice: 35.89, qtyOnHand: 10, isActive: true,
+    });
+
+    const res = await makeRequest(port, 'GET', '/api/parts/search?q=silver%20flex', {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.items.length >= 1);
+    const names = res.body.items.map((i) => i.qb_item_name);
+    assert.ok(names.includes('Flex:SLV04'),
+      `expected Flex:SLV04 in results; got ${JSON.stringify(names)}`);
+  });
+
+  it('GET /api/parts/search resolves SS2 / SS two / float switch → Drain Pans&Accessories:SS2', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SS2', name: 'SS2', fullName: 'Drain Pans&Accessories:SS2',
+      salesPrice: 23.88, qtyOnHand: 61, isActive: true,
+    });
+    // Distractor — H.P. pressure switch, not a float.
+    cache.upsertInventoryItem({
+      listId: 'LID-HP', name: '13R26 H.P. Switch', fullName: 'Allied Parts:13R26 H.P. Switch',
+      salesPrice: 22.99, qtyOnHand: 4, isActive: true,
+    });
+
+    for (const q of ['ss two', 'SS2', 'float switch', 'safety switch']) {
+      const res = await makeRequest(
+        port, 'GET', `/api/parts/search?q=${encodeURIComponent(q)}`,
+        { headers: { 'x-api-key': API_KEY } },
+      );
+      assert.equal(res.statusCode, 200, `q=${q}`);
+      assert.equal(res.body.items[0].qb_item_name, 'Drain Pans&Accessories:SS2',
+        `q=${q} should top-rank SS2`);
+    }
+  });
+
+  it('GET /api/parts/search ranks tab collar query within Tab Collars: category', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-TC04', name: 'TC04', fullName: 'Tab Collars:TC04',
+      salesPrice: 4.5, qtyOnHand: 80, isActive: true,
+    });
+    cache.upsertInventoryItem({
+      listId: 'LID-DECOY', name: '110812 4" Mini Lvrd Hd', fullName: "Builder's Best:110812 4\" Mini Lvrd Hd",
+      salesPrice: 4.93, qtyOnHand: 33, isActive: true,
+    });
+
+    const res = await makeRequest(port, 'GET', '/api/parts/search?q=4%20inch%20tab%20collar', {
+      headers: { 'x-api-key': API_KEY },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.items[0].qb_item_name, 'Tab Collars:TC04');
+  });
+
   // ─── POST /api/query ────────────────────────────────────────
 
   it('POST /api/query returns 202 with valid type', async () => {

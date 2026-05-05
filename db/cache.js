@@ -224,14 +224,15 @@ function normalizePartsQuery(query) {
   // (the QB item is "Mastic:White Mastic 1 Gallon PA"). Rewriting "bucket"
   // to "gallon" lets the size token actually filter mastic results.
   q = q.replace(/\bbucket(s)?\b/g, 'gallon');
-  // Dimension separators: callers say "8x4x4 boot" but the QB item is
-  // "B 8x4-4". Normalise both `x` and `-` between digits to spaces so each
-  // dimension becomes its own token; AND-matching across "8", "4", "4"
-  // still hits the right boot. Use lookbehind + lookahead so the digits
-  // themselves are not consumed (otherwise "8x4x4" only splits the first
-  // pair and leaves "4x4" stuck together).
+  // Dimension separators: callers say "8x4x4 boot" or "8 by 4 by 4 boot",
+  // but the QB item is "B 8x4-4". Normalise `x`, `-`, and the word "by"
+  // between digits to spaces so each dimension becomes its own token;
+  // AND-matching across "8", "4", "4" then hits the right boot. Use
+  // lookbehind + lookahead so the digits themselves are not consumed
+  // (otherwise "8x4x4" only splits the first pair).
   q = q.replace(/(?<=\d)\s*[xX]\s*(?=\d)/g, ' ');
   q = q.replace(/(?<=\d)\s*-\s*(?=\d)/g, ' ');
+  q = q.replace(/(?<=\d)\s+by\s+(?=\d)/gi, ' ');
   // Apply aliases (each pat is /gi so we can replace globally).
   const categories = new Set();
   for (const alias of BMB_PARTS_ALIASES) {

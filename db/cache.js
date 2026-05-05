@@ -135,9 +135,11 @@ const PARTS_NOISE_TOKENS = new Set([
   'a', 'an', 'the', 'of', 'and', 'or', 'with', 'for', 'to',
   'inch', 'inches', 'in', 'foot', 'feet', 'ft', 'pcs', 'pc', 'each', 'ea',
   'piece', 'pieces', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
-  'bucket', 'buckets', 'gal', 'gallon', 'gallons', 'pack', 'packs',
+  'pack', 'packs',
   'want', 'need', 'please', 'add', 'get', 'put',
 ]);
+// Note: 'bucket'/'gallon' are intentionally NOT noise — for mastic,
+// "bucket of mastic" must filter to gallon-sized mastic, not brushes.
 
 const PARTS_NUMBER_WORDS = {
   one: '1', two: '2', three: '3', four: '4', five: '5', six: '6',
@@ -169,6 +171,14 @@ const BMB_PARTS_ALIASES = [
   // "silver" alone (when paired with flex elsewhere in query) — drop it; it's
   // not in any QB field for the SLV product.
   { pat: /\bsilver\b/gi, removeMatch: true },
+  // Black flex variants — Flex:Black Flex *
+  { pat: /\bblack\s+flex\b/gi, category: 'Flex:Black Flex', removeMatch: true },
+  // Mobile-home flex variants
+  { pat: /\bmobile\s+home(?:\s+flex)?\b/gi, category: 'Flex:', removeMatch: true },
+  // Plain "flex" without a more specific qualifier defaults to silver/SLV —
+  // the most common ask. Add this AFTER the more-specific aliases above so
+  // they get a chance to remove their phrase first.
+  { pat: /\bflex\b/gi, category: 'Flex:SLV', removeMatch: true },
   // Tab / flat tap / saddle tap collars — distinct categories.
   { pat: /\bflat\s+tap(?:\s+collar)?/gi, category: 'Flat Tap Collar:', removeMatch: true },
   { pat: /\bsaddle\s+tap/gi, category: 'Saddle Taps:', removeMatch: true },
@@ -209,6 +219,16 @@ function normalizePartsQuery(query) {
     /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/g,
     (m) => PARTS_NUMBER_WORDS[m] || m
   );
+  // BMB caller idioms: "bucket of mastic" means a 1-gallon container of mastic
+  // (the QB item is "Mastic:White Mastic 1 Gallon PA"). Rewriting "bucket"
+  // to "gallon" lets the size token actually filter mastic results.
+  q = q.replace(/\bbucket(s)?\b/g, 'gallon');
+  // Dimension separators: callers say "8x4x4 boot" but the QB item is
+  // "B 8x4-4". Normalise both `x` and `-` between digits to spaces so each
+  // dimension becomes its own token; AND-matching across "8", "4", "4"
+  // still hits the right boot.
+  q = q.replace(/(\d)\s*[xX]\s*(\d)/g, '$1 $2');
+  q = q.replace(/(\d)\s*-\s*(\d)/g, '$1 $2');
   // Apply aliases (each pat is /gi so we can replace globally).
   const categories = new Set();
   for (const alias of BMB_PARTS_ALIASES) {
@@ -301,10 +321,24 @@ function searchParts(query, { limit = 25 } = {}) {
     parseInt(limit, 10) || 25,
   ];
 
+  // Canonical SKU pattern boost: BMB's primary part SKUs follow a short,
+  // structured pattern (TC04, FTC04, ST04, SLV04, AE04, DP3060, B 8x4-4,
+  // ECB45-5-P, PHK05BP). Specialty/decoy variants (DSO, Spin in, Mobile home,
+  // Brush, Spray Adhesive variants) have longer descriptive names. Within a
+  // category these canonical SKUs are usually what the caller actually means,
+  // so give them a +5 score boost. The regex is intentionally conservative:
+  // an alpha prefix (1-3 letters) followed immediately by digits, optionally
+  // followed by a single suffix segment.
+  const skuBoost = "(CASE WHEN ic.name GLOB '[A-Z][A-Z]*[0-9]*' " +
+                   "OR ic.name GLOB '[A-Z] [0-9]*x[0-9]*-[0-9]*' " +
+                   "OR ic.name GLOB '[A-Z][0-9]*x[0-9]*-[0-9]*' " +
+                   "THEN 5 ELSE 0 END)";
+
   return db.prepare(`
     SELECT ic.list_id, ic.name, ic.full_name, ic.sku, ic.description,
            ic.qty_on_hand, ic.sales_price, ic.synced_at,
-           (${scoreExpr}) AS match_score
+           (${scoreExpr}) AS match_score,
+           ${skuBoost} AS sku_boost
     FROM inventory_cache ic
     WHERE ic.is_active = 1
       ${categoryClause}
@@ -316,7 +350,7 @@ function searchParts(query, { limit = 25 } = {}) {
            OR pm.indoor_model  = ic.name COLLATE NOCASE
       )
     ORDER BY
-      match_score DESC,
+      (match_score + sku_boost) DESC,
       CASE WHEN ic.qty_on_hand > 0 THEN 0 ELSE 1 END,
       ic.full_name COLLATE NOCASE,
       ic.name COLLATE NOCASE

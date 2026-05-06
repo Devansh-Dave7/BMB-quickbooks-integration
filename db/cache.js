@@ -138,6 +138,12 @@ const PARTS_NOISE_TOKENS = new Set([
   'pack', 'packs',
   'stick', 'sticks', 'joint', 'joints', 'roll', 'rolls',  // length-units, low signal
   'want', 'need', 'please', 'add', 'get', 'put',
+  // Generic HVAC nouns Sophia bolts onto fabricated qb_item_names. Keeping
+  // them as tokens kills the AND-match (the actual SKUs don't carry these
+  // words anywhere) — e.g. "4 inch flex duct bag" → tokens ["4","duct"]
+  // after the `flex`/`bag` aliases run, but no Flex:SLV* item has "duct"
+  // in any field so the search returns 0.
+  'duct', 'pipe', 'item', 'product',
 ]);
 // Note: 'bucket'/'gallon' are intentionally NOT noise — for mastic,
 // "bucket of mastic" must filter to gallon-sized mastic, not brushes.
@@ -294,6 +300,20 @@ function searchParts(query, { limit = 25 } = {}) {
       ' + CASE WHEN ic.sku LIKE ? COLLATE NOCASE THEN 2 ELSE 0 END' +
       ' + CASE WHEN ic.description LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)'
     );
+    // Padded-size boost: BMB SKUs encode duct/elbow/collar size as a
+    // zero-padded two-digit suffix (AE04, TC06, SLV08). A bare single-digit
+    // token like "4" matches AE04 *and* AE14 via LIKE '%4%', and AE14 wins
+    // the length tiebreaker because the canonical 4" elbows carry a grade
+    // suffix ("AE04 30G", length 8). Boost items whose name OR sku contains
+    // the padded form ("04") so AE04-variants outrank AE14 even when longer.
+    if (/^\d$/.test(tok)) {
+      const padded = `%0${tok}%`;
+      scoreParams.push(padded, padded);
+      tokenScore.push(
+        '(CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 7 ELSE 0 END' +
+        ' + CASE WHEN ic.sku LIKE ? COLLATE NOCASE THEN 4 ELSE 0 END)'
+      );
+    }
   }
   const scoreExpr = tokenScore.length > 0 ? tokenScore.join(' + ') : '0';
 

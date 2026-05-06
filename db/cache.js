@@ -182,6 +182,10 @@ const BMB_PARTS_ALIASES = [
   { pat: /\bblack\s+flex\b/gi, category: 'Flex:Black Flex', removeMatch: true },
   // Mobile-home flex variants
   { pat: /\bmobile\s+home(?:\s+flex)?\b/gi, category: 'Flex:', removeMatch: true },
+  // T-Fin aluminum flex duct (Builder's Best). Must come BEFORE the plain
+  // `flex` alias — otherwise that alias eats the "flex" token first and
+  // this one never fires for "aluminum flex duct" queries.
+  { pat: /\b(t[\s-]*fin|aluminum\s+flex(?:\s+duct)?)\b/gi, category: "Builder's Best:T-Fin", removeMatch: true },
   // Plain "flex" without a more specific qualifier defaults to silver/SLV —
   // the most common ask. Add this AFTER the more-specific aliases above so
   // they get a chance to remove their phrase first.
@@ -212,8 +216,6 @@ const BMB_PARTS_ALIASES = [
   { pat: /\b(duct\s+tape|fasson(?:\s+tape)?)\b/gi, category: 'Tape:', removeMatch: true },
   // Adjustable elbows.
   { pat: /\badjustable\s+elbow/gi, category: 'Adjustable elbows:', removeMatch: true },
-  // T-Fin aluminum flex duct (Builder's Best).
-  { pat: /\b(t[\s-]*fin|aluminum\s+flex(?:\s+duct)?)\b/gi, category: "Builder's Best:T-Fin", removeMatch: true },
   // Air handler blocks (single item).
   { pat: /\bair\s+handler\s+block/gi, category: 'Air handler block', removeMatch: true },
 ];

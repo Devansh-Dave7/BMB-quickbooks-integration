@@ -300,18 +300,22 @@ function searchParts(query, { limit = 25 } = {}) {
       ' + CASE WHEN ic.sku LIKE ? COLLATE NOCASE THEN 2 ELSE 0 END' +
       ' + CASE WHEN ic.description LIKE ? COLLATE NOCASE THEN 1 ELSE 0 END)'
     );
-    // Padded-size boost: BMB SKUs encode duct/elbow/collar size as a
-    // zero-padded two-digit suffix (AE04, TC06, SLV08). A bare single-digit
+    // Padded-size boost: BMB part NAMES encode duct/elbow/collar size as a
+    // zero-padded two-digit suffix (AE04, TC06, SLV04). A bare single-digit
     // token like "4" matches AE04 *and* AE14 via LIKE '%4%', and AE14 wins
     // the length tiebreaker because the canonical 4" elbows carry a grade
-    // suffix ("AE04 30G", length 8). Boost items whose name OR sku contains
-    // the padded form ("04") so AE04-variants outrank AE14 even when longer.
+    // suffix ("AE04 30G", length 8). Boost items whose NAME contains the
+    // padded form ("04") so AE04-variants outrank AE14 even when longer.
+    //
+    // Important: only boost on `name`, not `sku`. SKU is an arbitrary
+    // numeric code (e.g. SLP10"x3' 24GA has sku "10110424") that can
+    // incidentally contain "04" without indicating size — boosting on sku
+    // mis-promoted that 10" pipe over the actual SLP 4"x5'.
     if (/^\d$/.test(tok)) {
       const padded = `%0${tok}%`;
-      scoreParams.push(padded, padded);
+      scoreParams.push(padded);
       tokenScore.push(
-        '(CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 7 ELSE 0 END' +
-        ' + CASE WHEN ic.sku LIKE ? COLLATE NOCASE THEN 4 ELSE 0 END)'
+        '(CASE WHEN ic.name LIKE ? COLLATE NOCASE THEN 7 ELSE 0 END)'
       );
     }
   }

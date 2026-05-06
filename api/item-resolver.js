@@ -13,6 +13,7 @@
  */
 const { getDb } = require('../db/schema');
 const { applyPriceLevelToItem } = require('../db/pricing');
+const cache = require('../db/cache');
 
 /**
  * Look up a pricing_metadata row by its qb_item_name, then resolve
@@ -223,10 +224,40 @@ function formatFollowupLine(item) {
   return `${qty}x ${raw} (caller's wording, not in catalog)`;
 }
 
+/**
+ * Last-resort recovery for items Sophia hallucinated. Pipes the caller's-
+ * words `name` through the same `searchParts` synonym map / scorer used by
+ * the `lookup_part` tool — so '4" Flex Duct Bag' becomes Flex:SLV04, 'Tab
+ * Collar 12 inch' becomes Tab Collars:TC12, etc. Returns the substitute
+ * with catalog price and a one-line audit string for the memo, or null
+ * if even the synonym map can't make sense of the phrase.
+ *
+ * Important: we ignore Sophia's `rate` (she sets it to 0 when fabricating)
+ * and use the catalog `sales_price` so the QB ticket has the right number.
+ * Quantity carries through.
+ */
+function attemptAutoMatch(item) {
+  const rawName = String((item && item.name) || '').replace(/^accessory:\s*/i, '').trim();
+  if (!rawName) return null;
+  const hits = cache.searchParts(rawName, { limit: 1 });
+  if (!hits || hits.length === 0) return null;
+  const top = hits[0];
+  const fullName = top.full_name || top.name;
+  const price = top.sales_price;
+  return {
+    original: rawName,
+    name: fullName,
+    sales_price: price,
+    qty: Number(item && item.qty) || 1,
+    audit_line: `AUTO-MATCHED: "${rawName}" → ${fullName}${price != null ? ` @ $${price}` : ''}`,
+  };
+}
+
 module.exports = {
   resolveItem,
   resolveOrderItems,
   resolveInventoryDirect,
   validateItemsExist,
   formatFollowupLine,
+  attemptAutoMatch,
 };

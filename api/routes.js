@@ -6,7 +6,7 @@ const cache = require('../db/cache');
 const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
-const { resolveOrderItems, validateItemsExist, formatFollowupLine } = require('./item-resolver');
+const { resolveOrderItems, validateItemsExist, formatFollowupLine, attemptAutoMatch } = require('./item-resolver');
 
 const router = express.Router();
 
@@ -80,6 +80,110 @@ function resolvePriceLevelForCustomer(customerMatch, context) {
   return priceLevel;
 }
 
+/**
+ * Two-stage rescue for items[] when Sophia's `qb_item_name` doesn't match
+ * the catalog:
+ *   1. validateItemsExist splits items into known-good / unknown.
+ *   2. For each unknown, attemptAutoMatch runs `searchParts` (same synonym
+ *      map the `lookup_part` tool uses) and substitutes a catalog hit when
+ *      found. Catalog price replaces Sophia's $0 fabrication.
+ * Whatever still can't be resolved is appended to `staff_followup_notes` so
+ * the order still lands and staff can bill the unmatched items separately.
+ *
+ * Returns:
+ *   - reject:               true if there's literally nothing to put on the order
+ *   - itemsForOrder:        merged valid + auto-matched items (the QB line items)
+ *   - autoMatchedItems:     [{original, resolved_name, resolved_price}] for caller-facing response
+ *   - autoFollowupItems:    [name] of items that couldn't be matched and went to followup
+ *   - staffFollowupNotes:   updated notes string with audit + followup lines prepended
+ *   - logDetail:            extra context for the audit log entry
+ */
+function rescueAndPartitionItems(items, existingFollowupNotes) {
+  const validation = validateItemsExist(items);
+  let staffFollowupNotes = existingFollowupNotes;
+
+  if (validation.ok) {
+    return {
+      reject: false,
+      itemsForOrder: items,
+      autoMatchedItems: [],
+      autoFollowupItems: [],
+      staffFollowupNotes,
+      logDetail: null,
+    };
+  }
+
+  const matched = [];
+  const stillUnmatched = [];
+  for (const inv of validation.invalid) {
+    const m = attemptAutoMatch(inv);
+    if (m) matched.push(m); else stillUnmatched.push(inv);
+  }
+
+  // Nothing salvageable — the caller will see a 400 and we'll log why.
+  if (validation.valid.length === 0 && matched.length === 0) {
+    return {
+      reject: true,
+      itemsForOrder: [],
+      autoMatchedItems: [],
+      autoFollowupItems: [],
+      staffFollowupNotes,
+      rejectPayload: {
+        error: 'Invalid items',
+        message:
+          'No line items matched a known QuickBooks product, and none could be ' +
+          'resolved via fuzzy catalog lookup. Use the lookup_part tool, or move ' +
+          'them all to staff_followup_notes.',
+        invalid_items: validation.invalid_names,
+        suggestions: validation.suggestions,
+      },
+      logDetail: {
+        reason: 'no_valid_items_after_auto_match',
+        invalid: validation.invalid_names,
+        suggestions: validation.suggestions,
+      },
+    };
+  }
+
+  const matchedAsLineItems = matched.map((m) => ({
+    name: m.name,
+    description: m.original,
+    qty: m.qty,
+    rate: m.sales_price,
+  }));
+  const itemsForOrder = [...validation.valid, ...matchedAsLineItems];
+
+  // Auto-match audit lines go FIRST in followup notes so the memo shows
+  // "AUTO-MATCHED: …" before "Nx unmatched (caller's wording…)" entries.
+  const auditLines = matched.map((m) => m.audit_line);
+  const followupLines = stillUnmatched.map(formatFollowupLine);
+  const allNoteSegments = [...auditLines, ...followupLines].filter(Boolean);
+  if (allNoteSegments.length > 0) {
+    const joined = allNoteSegments.join('; ');
+    staffFollowupNotes = staffFollowupNotes
+      ? `${joined}; ${String(staffFollowupNotes).trim()}`
+      : joined;
+  }
+
+  return {
+    reject: false,
+    itemsForOrder,
+    autoMatchedItems: matched.map((m) => ({
+      original: m.original,
+      resolved_name: m.name,
+      resolved_price: m.sales_price,
+    })),
+    autoFollowupItems: stillUnmatched.map((i) => i.name),
+    staffFollowupNotes,
+    logDetail: {
+      auto_matched_count: matched.length,
+      promoted_to_followup: stillUnmatched.map((i) => i.name),
+      suggestions: validation.suggestions,
+      valid_count: validation.valid.length,
+    },
+  };
+}
+
 // ─── POST /api/order — Queue a sales order ──────────────────────
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
@@ -87,46 +191,22 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
   let { staff_followup_notes } = req.body;
 
-  // Auto-promote unknown line items into staff_followup_notes instead of
-  // refusing the whole order. Sophia hallucinates qb_item_names with an
-  // "Accessory:" prefix when she skips lookup_part; this rescue path means
-  // the heat pump + heat kit still land on the QB ticket and the materials
-  // appear in the memo for staff to confirm and bill separately.
-  // We still reject if EVERY item is unknown — there's nothing to bill.
-  const validation = validateItemsExist(items);
-  let autoFollowupItems = [];
-  let validatedItems = items;
-  if (!validation.ok) {
-    if (validation.valid.length === 0) {
-      log.logEvent({
-        event: 'order_rejected_no_valid_items',
-        detail: {
-          customer_name, company_name, po_number,
-          invalid: validation.invalid_names,
-          suggestions: validation.suggestions,
-        },
-      });
-      return res.status(400).json({
-        error: 'Invalid items',
-        message: 'No line items matched a known QuickBooks product. Use the lookup_part tool to find catalog names, or move them all to staff_followup_notes.',
-        invalid_items: validation.invalid_names,
-        suggestions: validation.suggestions,
-      });
-    }
-    validatedItems = validation.valid;
-    autoFollowupItems = validation.invalid_names;
-    const promotedLines = validation.invalid.map(formatFollowupLine).join('; ');
-    staff_followup_notes = staff_followup_notes
-      ? `${String(staff_followup_notes).trim()}; ${promotedLines}`
-      : promotedLines;
+  const rescue = rescueAndPartitionItems(items, staff_followup_notes);
+  if (rescue.reject) {
     log.logEvent({
-      event: 'order_auto_promoted_invalid_items',
-      detail: {
-        customer_name, company_name, po_number,
-        promoted: validation.invalid_names,
-        suggestions: validation.suggestions,
-        valid_count: validation.valid.length,
-      },
+      event: 'order_rejected_no_valid_items',
+      detail: { customer_name, company_name, po_number, ...rescue.logDetail },
+    });
+    return res.status(400).json(rescue.rejectPayload);
+  }
+  const validatedItems = rescue.itemsForOrder;
+  const autoFollowupItems = rescue.autoFollowupItems;
+  const autoMatchedItems = rescue.autoMatchedItems;
+  staff_followup_notes = rescue.staffFollowupNotes;
+  if (rescue.logDetail) {
+    log.logEvent({
+      event: 'order_auto_resolved_invalid_items',
+      detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
   }
 
@@ -226,6 +306,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.auto_followup_items = autoFollowupItems;
   }
 
+  if (autoMatchedItems.length > 0) {
+    response.auto_matched_items = autoMatchedItems;
+  }
+
   res.status(202).json(response);
 });
 
@@ -236,41 +320,22 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
   let { staff_followup_notes } = req.body;
 
-  // Same auto-promote behaviour as /api/order — see commentary there.
-  const validation = validateItemsExist(items);
-  let autoFollowupItems = [];
-  let validatedItems = items;
-  if (!validation.ok) {
-    if (validation.valid.length === 0) {
-      log.logEvent({
-        event: 'invoice_rejected_no_valid_items',
-        detail: {
-          customer_name, company_name, po_number,
-          invalid: validation.invalid_names,
-          suggestions: validation.suggestions,
-        },
-      });
-      return res.status(400).json({
-        error: 'Invalid items',
-        message: 'No line items matched a known QuickBooks product. Use the lookup_part tool to find catalog names, or move them all to staff_followup_notes.',
-        invalid_items: validation.invalid_names,
-        suggestions: validation.suggestions,
-      });
-    }
-    validatedItems = validation.valid;
-    autoFollowupItems = validation.invalid_names;
-    const promotedLines = validation.invalid.map(formatFollowupLine).join('; ');
-    staff_followup_notes = staff_followup_notes
-      ? `${String(staff_followup_notes).trim()}; ${promotedLines}`
-      : promotedLines;
+  const rescue = rescueAndPartitionItems(items, staff_followup_notes);
+  if (rescue.reject) {
     log.logEvent({
-      event: 'invoice_auto_promoted_invalid_items',
-      detail: {
-        customer_name, company_name, po_number,
-        promoted: validation.invalid_names,
-        suggestions: validation.suggestions,
-        valid_count: validation.valid.length,
-      },
+      event: 'invoice_rejected_no_valid_items',
+      detail: { customer_name, company_name, po_number, ...rescue.logDetail },
+    });
+    return res.status(400).json(rescue.rejectPayload);
+  }
+  const validatedItems = rescue.itemsForOrder;
+  const autoFollowupItems = rescue.autoFollowupItems;
+  const autoMatchedItems = rescue.autoMatchedItems;
+  staff_followup_notes = rescue.staffFollowupNotes;
+  if (rescue.logDetail) {
+    log.logEvent({
+      event: 'invoice_auto_resolved_invalid_items',
+      detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
   }
 
@@ -364,6 +429,10 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
 
   if (autoFollowupItems.length > 0) {
     invoiceResponse.auto_followup_items = autoFollowupItems;
+  }
+
+  if (autoMatchedItems.length > 0) {
+    invoiceResponse.auto_matched_items = autoMatchedItems;
   }
 
   res.status(202).json(invoiceResponse);

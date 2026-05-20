@@ -777,6 +777,34 @@ router.get('/price-levels', (req, res) => {
   });
 });
 
+// ─── POST /api/admin/seed-pricing — Force ensurePricingSeeded ─────
+//
+// Manual trigger for ensurePricingSeeded(). Needed when Railway has
+// hot-loaded new code without restarting the process (so the startup
+// hook never re-runs). Re-running is idempotent — the function bails
+// early when pricing_metadata already has rows.
+
+router.post('/admin/seed-pricing', (req, res) => {
+  try {
+    const { ensurePricingSeeded } = require('../db/pricing');
+    const before = require('../db/schema').getDb()
+      .prepare('SELECT COUNT(*) as cnt FROM pricing_metadata').get();
+    ensurePricingSeeded();
+    const after = require('../db/schema').getDb()
+      .prepare('SELECT COUNT(*) as cnt FROM pricing_metadata').get();
+    res.json({
+      status: 'ok',
+      rows_before: before.cnt,
+      rows_after: after.cnt,
+      message: before.cnt === after.cnt && after.cnt > 0
+        ? 'Already seeded (no change)'
+        : `Seeded ${after.cnt - before.cnt} rows`,
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message, stack: err.stack });
+  }
+});
+
 // ─── GET /api/status — Server health + sync info ────────────────
 
 router.get('/status', (req, res) => {

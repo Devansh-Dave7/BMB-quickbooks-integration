@@ -4,7 +4,12 @@ const { getDb } = require('./schema');
 const cache = require('./cache');
 const log = require('./log');
 
-const SEED_FILE = path.join(__dirname, '..', 'data', 'pricing-seed.json');
+// Lives at the repo root (NOT inside data/). Railway mounts a persistent
+// volume at /app/data so the sqlite file survives redeploys — but that
+// mount also masks any static files shipped in data/, so a seed file
+// placed there is invisible at runtime. Keeping the seed at the repo root
+// keeps it deployable while the volume continues to hold the DB.
+const SEED_FILE = path.join(__dirname, '..', 'pricing-seed.json');
 
 const CATEGORY_LABELS = {
   heat_pump: 'Heat Pumps',

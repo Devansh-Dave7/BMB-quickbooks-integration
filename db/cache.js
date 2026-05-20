@@ -194,6 +194,10 @@ const BMB_PARTS_ALIASES = [
   { pat: /\bflat\s+tap(?:\s+collar)?/gi, category: 'Flat Tap Collar:', removeMatch: true },
   { pat: /\bsaddle\s+tap/gi, category: 'Saddle Taps:', removeMatch: true },
   { pat: /\btab\s+collar/gi, category: 'Tab Collars:', removeMatch: true },
+  // "Cap collar" / "tap collar" — frequent ASR mishears of "tab collar".
+  // Both Tab Collars and Flat Tap Collar live in BMB's catalog; default to
+  // Tab Collars (TC*) which is the higher-volume SKU family.
+  { pat: /\b(cap|tap)\s+collar\b/gi, category: 'Tab Collars:', removeMatch: true },
   // Drain pans + hurricane condenser pads.
   { pat: /\bdrain\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
   { pat: /\bhurricane\s+pad/gi, category: 'Condenser Pads:Hurricane', removeMatch: true },
@@ -230,8 +234,15 @@ function normalizePartsQuery(query) {
   );
   // BMB caller idioms: "bucket of mastic" means a 1-gallon container of mastic
   // (the QB item is "Mastic:White Mastic 1 Gallon PA"). Rewriting "bucket"
-  // to "gallon" lets the size token actually filter mastic results.
-  q = q.replace(/\bbucket(s)?\b/g, 'gallon');
+  // to "gallon" lets the size token actually filter mastic results. ONLY do
+  // this when mastic is in the query — otherwise "bucket of SS2" gets the
+  // bogus "gallon" token AND-ed in (SS2 has no gallon variant) and matches
+  // zero. For non-mastic queries, just drop "bucket" as noise.
+  if (/\bmastic\b/.test(q)) {
+    q = q.replace(/\bbucket(s)?\b/g, 'gallon');
+  } else {
+    q = q.replace(/\bbucket(s)?\b/g, ' ');
+  }
   // Dimension separators: callers say "8x4x4 boot" or "8 by 4 by 4 boot",
   // but the QB item is "B 8x4-4". Normalise `x`, `-`, and the word "by"
   // between digits to spaces so each dimension becomes its own token;

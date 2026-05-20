@@ -777,6 +777,46 @@ router.get('/price-levels', (req, res) => {
   });
 });
 
+// ─── GET /api/admin/diagnose — QBWC connectivity / queue snapshot ──
+//
+// When orders are queued but not landing in QB, this endpoint surfaces the
+// state without needing DB access: pending queue items, recent sync events
+// (so we can tell whether QBWC is even attempting to connect), and the
+// last successful sync close. If `last_sync` is hours old or the most
+// recent events have no `authenticate` entries, QBWC on the BMB office
+// machine is offline — not a server issue.
+
+router.get('/admin/diagnose', (req, res) => {
+  const db = require('../db/schema').getDb();
+  const pending = db.prepare(`
+    SELECT id, type, status, created_at, sent_at, completed_at,
+           substr(qbxml, 1, 200) as qbxml_preview
+    FROM request_queue
+    WHERE status IN ('pending', 'sent')
+    ORDER BY created_at DESC
+    LIMIT 25
+  `).all();
+  const recentEvents = log.getRecentLogs(40).map((e) => ({
+    created_at: e.created_at,
+    event: e.event,
+    ticket: e.ticket,
+    request_type: e.request_type,
+    detail: e.detail ? String(e.detail).slice(0, 200) : null,
+  }));
+  const recentErrors = log.getErrorLogs(15).map((e) => ({
+    created_at: e.created_at,
+    detail: e.detail ? String(e.detail).slice(0, 400) : null,
+  }));
+  res.json({
+    last_successful_sync_close: log.getLastSyncTime(),
+    queue_depth_pending: pending.filter((p) => p.status === 'pending').length,
+    queue_depth_in_flight: pending.filter((p) => p.status === 'sent').length,
+    pending_items: pending,
+    recent_events: recentEvents,
+    recent_errors: recentErrors,
+  });
+});
+
 // ─── POST /api/admin/seed-pricing — Force ensurePricingSeeded ─────
 //
 // Manual trigger for ensurePricingSeeded(). Needed when Railway has

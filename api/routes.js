@@ -817,6 +817,36 @@ router.get('/admin/diagnose', (req, res) => {
   });
 });
 
+// ─── POST /api/admin/queue/cleanup-stuck — Clear stale in-flight items ──
+//
+// An item lands in `status=sent` when QBWC asks for the next request and we
+// hand it over. The status should flip back to `completed`/`error` when
+// QBWC posts the response. If QBWC dies mid-cycle (connection drop, QB
+// crash, computer reboot), the item stays `sent` forever and shows up in
+// the diagnose snapshot as "in-flight" even though nothing is actually
+// happening. Marks any `sent` row whose sent_at is older than the cutoff
+// (default 10 minutes) as `error` so the queue snapshot stays accurate.
+
+router.post('/admin/queue/cleanup-stuck', (req, res) => {
+  const minutes = parseInt(req.query.older_than_minutes, 10) || 10;
+  const db = require('../db/schema').getDb();
+  const stale = db.prepare(`
+    SELECT id, type, sent_at FROM request_queue
+    WHERE status = 'sent' AND sent_at < datetime('now', ?)
+  `).all(`-${minutes} minutes`);
+  const result = db.prepare(`
+    UPDATE request_queue
+    SET status = 'error', completed_at = datetime('now')
+    WHERE status = 'sent' AND sent_at < datetime('now', ?)
+  `).run(`-${minutes} minutes`);
+  res.json({
+    status: 'ok',
+    cleared: result.changes,
+    older_than_minutes: minutes,
+    items: stale.map((s) => ({ id: s.id, type: s.type, sent_at: s.sent_at })),
+  });
+});
+
 // ─── POST /api/admin/seed-pricing — Force ensurePricingSeeded ─────
 //
 // Manual trigger for ensurePricingSeeded(). Needed when Railway has

@@ -2,17 +2,22 @@ const { getDb } = require('./schema');
 
 /**
  * Log a sync event.
+ *
+ * `call_id` is the Retell call identifier — used to correlate backend
+ * audit events with the user-facing call that produced them. Optional;
+ * back-compat for QBWC events that aren't tied to a specific call.
  */
-function logEvent({ ticket = null, event, requestType = null, detail = null }) {
+function logEvent({ ticket = null, event, requestType = null, detail = null, call_id = null }) {
   const db = getDb();
   db.prepare(`
-    INSERT INTO sync_log (ticket, event, request_type, detail)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO sync_log (ticket, event, request_type, detail, call_id)
+    VALUES (?, ?, ?, ?, ?)
   `).run(
     ticket,
     event,
     requestType,
-    detail && typeof detail === 'object' ? JSON.stringify(detail) : detail
+    detail && typeof detail === 'object' ? JSON.stringify(detail) : detail,
+    call_id
   );
 }
 

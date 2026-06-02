@@ -6,9 +6,18 @@ const cache = require('../db/cache');
 const pricing = require('../db/pricing');
 const log = require('../db/log');
 const templates = require('../qbxml/templates');
-const { resolveOrderItems, validateItemsExist, formatFollowupLine, attemptAutoMatch } = require('./item-resolver');
+const {
+  resolveOrderItems, validateItemsExist, formatFollowupLine, attemptAutoMatch,
+  isCatalogValid,
+} = require('./item-resolver');
+const callHistory = require('../db/call-history');
 
 const router = express.Router();
+
+// Fix 3 kill switch. When false, mandatory-staff_followup_notes enforcement
+// is bypassed — existing 2026-05-20 auto-promote behaviour is preserved.
+// Default ON; set REQUIRE_FOLLOWUP_NOTES=0 in Railway env to disable.
+const REQUIRE_FOLLOWUP_NOTES = process.env.REQUIRE_FOLLOWUP_NOTES !== '0';
 
 // All REST routes require API key
 router.use(apiKeyAuth);
@@ -81,49 +90,87 @@ function resolvePriceLevelForCustomer(customerMatch, context) {
 }
 
 /**
- * Two-stage rescue for items[] when Sophia's `qb_item_name` doesn't match
- * the catalog:
- *   1. validateItemsExist splits items into known-good / unknown.
- *   2. For each unknown, attemptAutoMatch runs `searchParts` (same synonym
- *      map the `lookup_part` tool uses) and substitutes a catalog hit when
- *      found. Catalog price replaces Sophia's $0 fabrication.
- * Whatever still can't be resolved is appended to `staff_followup_notes` so
- * the order still lands and staff can bill the unmatched items separately.
+ * Three-tier rescue + gate for create_quickbooks_order items[].
  *
- * Returns:
- *   - reject:               true if there's literally nothing to put on the order
- *   - itemsForOrder:        merged valid + auto-matched items (the QB line items)
- *   - autoMatchedItems:     [{original, resolved_name, resolved_price}] for caller-facing response
- *   - autoFollowupItems:    [name] of items that couldn't be matched and went to followup
- *   - staffFollowupNotes:   updated notes string with audit + followup lines prepended
- *   - logDetail:            extra context for the audit log entry
+ * For each item, in order of preference:
+ *   1. CATALOG-DIRECT  — name matches pricing_metadata or inventory_cache
+ *      → item passes (Sophia copied a real qb_item_name from a [QB_DATA]
+ *      block, which is the canonical path).
+ *   2. LOOKUP-EVIDENCE — name appears in this call_id's call_lookup_history
+ *      (i.e. Sophia called lookup_part for this caller item earlier in the
+ *      same call) → item passes (Fix 1 — Sophia did the right thing).
+ *   3. AUTO-MATCH      — synonym map (searchParts) finds a close catalog
+ *      match for Sophia's fabricated phrasing → item passes BUT we log a
+ *      warning and (per Fix 3 when REQUIRE_FOLLOWUP_NOTES=1) demand that
+ *      staff_followup_notes was populated, so ops sees what got rescued.
+ *   4. NO MATCH        — Sophia's phrasing has no synonym either; the line
+ *      is promoted into staff_followup_notes verbatim with quantity.
+ *
+ * If the result has zero items[] AND zero auto-matches the request is
+ * rejected with HTTP 400. If auto-match was used and notes are empty,
+ * Fix 3 returns HTTP 422 with a Sophia-actionable directive so she
+ * resubmits with the required notes rather than telling the caller
+ * "success".
  */
-function rescueAndPartitionItems(items, existingFollowupNotes) {
-  const validation = validateItemsExist(items);
+function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
+  const call_id = opts.call_id || null;
   let staffFollowupNotes = existingFollowupNotes;
 
-  if (validation.ok) {
-    return {
-      reject: false,
-      itemsForOrder: items,
-      autoMatchedItems: [],
-      autoFollowupItems: [],
-      staffFollowupNotes,
-      logDetail: null,
-    };
+  const valid = [];                  // tier 1 hits
+  const lookupGated = [];            // tier 2 hits
+  const autoMatched = [];            // tier 3 hits ({ original, name, sales_price, qty, audit_line })
+  const stillUnmatched = [];         // tier 4 (followup-only)
+  const suggestions = {};
+  const invalidNames = [];           // names that didn't pass tier 1 (for audit)
+
+  // Compile fuzzy-suggestion lookup once for performance; only used for
+  // the 400 reject path. Same query as validateItemsExist.
+  const { getDb } = require('../db/schema');
+  const db = getDb();
+  const stmtFuzzy = db.prepare(`
+    SELECT name, full_name, sales_price FROM inventory_cache
+    WHERE is_active = 1 AND (name LIKE ? COLLATE NOCASE OR full_name LIKE ? COLLATE NOCASE)
+    ORDER BY CASE WHEN qty_on_hand > 0 THEN 0 ELSE 1 END, name COLLATE NOCASE
+    LIMIT 5
+  `);
+
+  for (const item of items || []) {
+    const name = item && item.name;
+    if (!name) continue;
+
+    if (isCatalogValid(name)) {
+      valid.push(item);
+      continue;
+    }
+    invalidNames.push(name);
+
+    // Tier 2: lookup_part evidence for this call_id (Fix 1)
+    if (call_id && callHistory.hasLookupHitForCall(call_id, name)) {
+      lookupGated.push(item);
+      continue;
+    }
+
+    // Tier 3: fuzzy auto-match fallback
+    const m = attemptAutoMatch(item);
+    if (m) { autoMatched.push(m); continue; }
+
+    // Tier 4: unmatched → followup
+    stillUnmatched.push(item);
+    const pattern = `%${name.replace(/[%_]/g, '')}%`;
+    const matches = stmtFuzzy.all(pattern, pattern);
+    if (matches.length > 0) {
+      suggestions[name] = matches.map((mm) => ({
+        full_name: mm.full_name || mm.name,
+        sales_price: mm.sales_price,
+      }));
+    }
   }
 
-  const matched = [];
-  const stillUnmatched = [];
-  for (const inv of validation.invalid) {
-    const m = attemptAutoMatch(inv);
-    if (m) matched.push(m); else stillUnmatched.push(inv);
-  }
-
-  // Nothing salvageable — the caller will see a 400 and we'll log why.
-  if (validation.valid.length === 0 && matched.length === 0) {
+  // 400 path: nothing salvageable on any tier.
+  if (valid.length === 0 && lookupGated.length === 0 && autoMatched.length === 0) {
     return {
       reject: true,
+      rejectStatus: 400,
       itemsForOrder: [],
       autoMatchedItems: [],
       autoFollowupItems: [],
@@ -131,31 +178,71 @@ function rescueAndPartitionItems(items, existingFollowupNotes) {
       rejectPayload: {
         error: 'Invalid items',
         message:
-          'No line items matched a known QuickBooks product, and none could be ' +
-          'resolved via fuzzy catalog lookup. Use the lookup_part tool, or move ' +
-          'them all to staff_followup_notes.',
-        invalid_items: validation.invalid_names,
-        suggestions: validation.suggestions,
+          'No line items matched a known QuickBooks product, none had lookup_part ' +
+          'evidence for this call, and none could be resolved via fuzzy catalog ' +
+          'lookup. Use the lookup_part tool for each material, or move them all ' +
+          'to staff_followup_notes.',
+        invalid_items: invalidNames,
+        suggestions,
       },
       logDetail: {
-        reason: 'no_valid_items_after_auto_match',
-        invalid: validation.invalid_names,
-        suggestions: validation.suggestions,
+        reason: 'no_valid_items_after_all_tiers',
+        invalid: invalidNames,
+        suggestions,
+        call_id,
       },
     };
   }
 
-  const matchedAsLineItems = matched.map((m) => ({
+  // 422 path (Fix 3): auto-match or auto-followup occurred AND
+  // staff_followup_notes is empty AND the kill switch is on. Reject with a
+  // structured retry directive so Sophia repopulates notes instead of
+  // telling the caller "all set".
+  const notesEmpty = !staffFollowupNotes || !String(staffFollowupNotes).trim();
+  const rescueTriggered = autoMatched.length > 0 || stillUnmatched.length > 0;
+  if (REQUIRE_FOLLOWUP_NOTES && rescueTriggered && notesEmpty) {
+    return {
+      reject: true,
+      rejectStatus: 422,
+      itemsForOrder: [],
+      autoMatchedItems: autoMatched.map((m) => ({
+        original: m.original, resolved_name: m.name, resolved_price: m.sales_price,
+      })),
+      autoFollowupItems: stillUnmatched.map((i) => i.name),
+      staffFollowupNotes,
+      rejectPayload: {
+        error: 'staff_followup_notes_required',
+        message:
+          `Order NOT placed. ${autoMatched.length} item(s) were auto-matched from ` +
+          `caller wording and ${stillUnmatched.length} could not be matched. ` +
+          `You MUST populate staff_followup_notes with the caller's verbatim wording ` +
+          `(plus quantities) for the questionable items so the team can verify ` +
+          `pricing, then resubmit create_quickbooks_order with the SAME items[]. ` +
+          `Do NOT tell the caller "all set" yet.`,
+        auto_matched_items: autoMatched.map((m) => ({ original: m.original, resolved_name: m.name, resolved_price: m.sales_price })),
+        auto_followup_candidates: stillUnmatched.map((i) => i.name),
+      },
+      logDetail: {
+        reason: 'staff_followup_notes_required',
+        auto_matched_count: autoMatched.length,
+        promoted_to_followup_count: stillUnmatched.length,
+        call_id,
+      },
+    };
+  }
+
+  // Build final items list. Tier-3 matches replace Sophia's fabricated
+  // name/rate with the catalog hit's full_name + sales_price.
+  const matchedAsLineItems = autoMatched.map((m) => ({
     name: m.name,
     description: m.original,
     qty: m.qty,
     rate: m.sales_price,
   }));
-  const itemsForOrder = [...validation.valid, ...matchedAsLineItems];
+  const itemsForOrder = [...valid, ...lookupGated, ...matchedAsLineItems];
 
-  // Auto-match audit lines go FIRST in followup notes so the memo shows
-  // "AUTO-MATCHED: …" before "Nx unmatched (caller's wording…)" entries.
-  const auditLines = matched.map((m) => m.audit_line);
+  // Build audit-line + followup-line memo segments.
+  const auditLines = autoMatched.map((m) => m.audit_line);
   const followupLines = stillUnmatched.map(formatFollowupLine);
   const allNoteSegments = [...auditLines, ...followupLines].filter(Boolean);
   if (allNoteSegments.length > 0) {
@@ -165,22 +252,28 @@ function rescueAndPartitionItems(items, existingFollowupNotes) {
       : joined;
   }
 
+  // Did this submission depend on any tier other than tier-1 catalog?
+  const wasGated = lookupGated.length > 0 || autoMatched.length > 0 || stillUnmatched.length > 0;
+
   return {
     reject: false,
     itemsForOrder,
-    autoMatchedItems: matched.map((m) => ({
+    autoMatchedItems: autoMatched.map((m) => ({
       original: m.original,
       resolved_name: m.name,
       resolved_price: m.sales_price,
     })),
+    lookupGatedItems: lookupGated.map((i) => i.name),
     autoFollowupItems: stillUnmatched.map((i) => i.name),
     staffFollowupNotes,
-    logDetail: {
-      auto_matched_count: matched.length,
+    logDetail: wasGated ? {
+      catalog_direct_count: valid.length,
+      lookup_gated_count: lookupGated.length,
+      auto_matched_count: autoMatched.length,
       promoted_to_followup: stillUnmatched.map((i) => i.name),
-      suggestions: validation.suggestions,
-      valid_count: validation.valid.length,
-    },
+      suggestions,
+      call_id,
+    } : null,
   };
 }
 
@@ -188,24 +281,31 @@ function rescueAndPartitionItems(items, existingFollowupNotes) {
 
 router.post('/order', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
+    call_id } = req.body;
   let { staff_followup_notes } = req.body;
 
-  const rescue = rescueAndPartitionItems(items, staff_followup_notes);
+  const rescue = rescueAndPartitionItems(items, staff_followup_notes, { call_id });
   if (rescue.reject) {
+    const evt = rescue.rejectStatus === 422
+      ? 'order_rejected_followup_notes_required'
+      : 'order_rejected_no_valid_items';
     log.logEvent({
-      event: 'order_rejected_no_valid_items',
+      event: evt,
+      call_id,
       detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
-    return res.status(400).json(rescue.rejectPayload);
+    return res.status(rescue.rejectStatus || 400).json(rescue.rejectPayload);
   }
   const validatedItems = rescue.itemsForOrder;
   const autoFollowupItems = rescue.autoFollowupItems;
   const autoMatchedItems = rescue.autoMatchedItems;
+  const lookupGatedItems = rescue.lookupGatedItems || [];
   staff_followup_notes = rescue.staffFollowupNotes;
   if (rescue.logDetail) {
     log.logEvent({
       event: 'order_auto_resolved_invalid_items',
+      call_id,
       detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
   }
@@ -310,6 +410,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.auto_matched_items = autoMatchedItems;
   }
 
+  if (lookupGatedItems.length > 0) {
+    response.lookup_gated_items = lookupGatedItems;
+  }
+
   res.status(202).json(response);
 });
 
@@ -317,24 +421,31 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
 
 router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const { customer_name, customer_ref, po_number, items, memo, callback_url,
-    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name } = req.body;
+    is_new_customer, company_name, customer_phone, customer_email, first_name, last_name,
+    call_id } = req.body;
   let { staff_followup_notes } = req.body;
 
-  const rescue = rescueAndPartitionItems(items, staff_followup_notes);
+  const rescue = rescueAndPartitionItems(items, staff_followup_notes, { call_id });
   if (rescue.reject) {
+    const evt = rescue.rejectStatus === 422
+      ? 'invoice_rejected_followup_notes_required'
+      : 'invoice_rejected_no_valid_items';
     log.logEvent({
-      event: 'invoice_rejected_no_valid_items',
+      event: evt,
+      call_id,
       detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
-    return res.status(400).json(rescue.rejectPayload);
+    return res.status(rescue.rejectStatus || 400).json(rescue.rejectPayload);
   }
   const validatedItems = rescue.itemsForOrder;
   const autoFollowupItems = rescue.autoFollowupItems;
   const autoMatchedItems = rescue.autoMatchedItems;
+  const lookupGatedItems = rescue.lookupGatedItems || [];
   staff_followup_notes = rescue.staffFollowupNotes;
   if (rescue.logDetail) {
     log.logEvent({
       event: 'invoice_auto_resolved_invalid_items',
+      call_id,
       detail: { customer_name, company_name, po_number, ...rescue.logDetail },
     });
   }
@@ -435,6 +546,10 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
     invoiceResponse.auto_matched_items = autoMatchedItems;
   }
 
+  if (lookupGatedItems.length > 0) {
+    invoiceResponse.lookup_gated_items = lookupGatedItems;
+  }
+
   res.status(202).json(invoiceResponse);
 });
 
@@ -529,7 +644,34 @@ router.get('/parts/search', (req, res) => {
     return res.status(400).json({ error: 'Missing required query param `q`' });
   }
   const limit = Math.min(parseInt(req.query.limit, 10) || 25, 50);
+  const call_id = (req.query.call_id || '').toString().trim() || null;
   const items = cache.searchParts(q, { limit });
+
+  // Fix 1: record each lookup_part hit against the call_id so a later
+  // create_quickbooks_order can verify Sophia did the lookup. Wrapped in
+  // try/catch — a DB hiccup here must not break the search response that
+  // Sophia is waiting on.
+  if (call_id && items.length > 0) {
+    try {
+      items.forEach((i, idx) => {
+        callHistory.recordLookupHit({
+          call_id,
+          qb_item_name: i.full_name || i.name,
+          source: 'lookup_part',
+          search_query: q,
+          sales_price: i.sales_price,
+          rank: idx,
+        });
+      });
+    } catch (err) {
+      log.logEvent({
+        event: 'call_history_record_failed',
+        call_id,
+        detail: { query: q, error: String(err && err.message || err) },
+      });
+    }
+  }
+
   res.json({
     query: q,
     count: items.length,
@@ -845,6 +987,30 @@ router.post('/admin/queue/cleanup-stuck', (req, res) => {
     older_than_minutes: minutes,
     items: stale.map((s) => ({ id: s.id, type: s.type, sent_at: s.sent_at })),
   });
+});
+
+// ─── GET /api/admin/call-history/:call_id — Inspect lookup_part hits ──
+//
+// Returns every lookup_part hit recorded for this Retell call_id, so we
+// can tell whether the lookup-evidence gate at /api/order would pass any
+// item. Useful when Sophia submits an order and we want to know what
+// she actually looked up vs. fabricated.
+
+router.get('/admin/call-history/:call_id', (req, res) => {
+  const hits = callHistory.getHitsForCall(req.params.call_id);
+  res.json({
+    call_id: req.params.call_id,
+    hit_count: hits.length,
+    hits,
+  });
+});
+
+// ─── POST /api/admin/call-history/cleanup?days=14 — Prune old hits ────
+
+router.post('/admin/call-history/cleanup', (req, res) => {
+  const days = Math.max(parseInt(req.query.days, 10) || 14, 1);
+  const removed = callHistory.cleanupOldHits(days);
+  res.json({ status: 'ok', removed, days_old_threshold: days });
 });
 
 // ─── POST /api/admin/seed-pricing — Force ensurePricingSeeded ─────

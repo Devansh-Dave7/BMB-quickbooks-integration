@@ -42,6 +42,7 @@ function clearAllTables() {
   db.exec('DELETE FROM order_responses');
   db.exec('DELETE FROM sync_log');
   db.exec('DELETE FROM pricing_metadata');
+  db.exec('DELETE FROM call_lookup_history');
 }
 
 /**

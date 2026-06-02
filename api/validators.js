@@ -43,6 +43,10 @@ function validateOrderPayload(body) {
     errors.push('staff_followup_notes must be a string');
   }
 
+  if (body.call_id != null && typeof body.call_id !== 'string') {
+    errors.push('call_id must be a string');
+  }
+
   return errors;
 }
 

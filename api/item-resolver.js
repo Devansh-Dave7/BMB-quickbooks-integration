@@ -169,6 +169,29 @@ function resolveOrderItems(items, priceLevel = null) {
  * Returns { ok, valid: [items], invalid: [items], invalid_names: [], suggestions: {name: [...]}}.
  * `ok` is true iff every item matched.
  */
+/**
+ * Per-item check: does this name match a known QB product directly?
+ * (pricing_metadata.qb_item_name OR inventory_cache.name/full_name)
+ *
+ * Extracted from validateItemsExist so the routes.js gate can mix it
+ * with other checks (e.g. call_lookup_history) without paying for the
+ * full batch's fuzzy-suggestion query on every item.
+ */
+function isCatalogValid(name) {
+  if (!name || typeof name !== 'string') return false;
+  const db = getDb();
+  const pm = db.prepare(`
+    SELECT 1 FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE LIMIT 1
+  `).get(name);
+  if (pm) return true;
+  const ic = db.prepare(`
+    SELECT 1 FROM inventory_cache
+    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    LIMIT 1
+  `).get(name, name);
+  return !!ic;
+}
+
 function validateItemsExist(items) {
   const db = getDb();
   const valid = [];
@@ -176,14 +199,6 @@ function validateItemsExist(items) {
   const invalidNames = [];
   const suggestions = {};
 
-  const stmtPm = db.prepare(`
-    SELECT 1 FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE LIMIT 1
-  `);
-  const stmtIc = db.prepare(`
-    SELECT 1 FROM inventory_cache
-    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
-    LIMIT 1
-  `);
   const stmtFuzzy = db.prepare(`
     SELECT name, full_name, sales_price FROM inventory_cache
     WHERE is_active = 1 AND (name LIKE ? COLLATE NOCASE OR full_name LIKE ? COLLATE NOCASE)
@@ -194,7 +209,7 @@ function validateItemsExist(items) {
   for (const item of items || []) {
     const name = item && item.name;
     if (!name) continue;
-    if (stmtPm.get(name) || stmtIc.get(name, name)) {
+    if (isCatalogValid(name)) {
       valid.push(item);
       continue;
     }
@@ -257,6 +272,7 @@ module.exports = {
   resolveItem,
   resolveOrderItems,
   resolveInventoryDirect,
+  isCatalogValid,
   validateItemsExist,
   formatFollowupLine,
   attemptAutoMatch,

@@ -112,6 +112,23 @@ function initTables(db) {
       event TEXT,
       request_type TEXT,
       detail TEXT,
+      call_id TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Per-Retell-call record of lookup_part hits. Used by the create_quickbooks_order
+    -- gate to require that any material-line qb_item_name actually came from a
+    -- lookup_part call earlier in the same call_id (rather than Sophia fabricating it).
+    -- Auto-match still rescues fabricated names but logs a warning + forces
+    -- staff_followup_notes (see Fix 3). Rows are pruned after 14 days.
+    CREATE TABLE IF NOT EXISTS call_lookup_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id TEXT NOT NULL,
+      qb_item_name TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'lookup_part',
+      search_query TEXT,
+      sales_price REAL,
+      rank INTEGER,
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -181,6 +198,12 @@ function initTables(db) {
 
     CREATE INDEX IF NOT EXISTS idx_pm_indoor_model
       ON pricing_metadata(indoor_model COLLATE NOCASE);
+
+    CREATE INDEX IF NOT EXISTS idx_clh_call_id
+      ON call_lookup_history(call_id, qb_item_name COLLATE NOCASE);
+
+    CREATE INDEX IF NOT EXISTS idx_clh_created
+      ON call_lookup_history(created_at);
   `);
 }
 
@@ -193,6 +216,14 @@ function migrateSchema(db) {
   }
   if (!colNames.includes('price_level_name')) {
     db.exec("ALTER TABLE customer_cache ADD COLUMN price_level_name TEXT");
+  }
+
+  // Fix 1 migration: sync_log.call_id lets us cross-reference audit events with the
+  // Retell call that produced them. New tables get the column from CREATE TABLE
+  // above; existing deploys need this ALTER.
+  const syncCols = db.prepare("PRAGMA table_info('sync_log')").all().map((c) => c.name);
+  if (!syncCols.includes('call_id')) {
+    db.exec("ALTER TABLE sync_log ADD COLUMN call_id TEXT");
   }
 }
 

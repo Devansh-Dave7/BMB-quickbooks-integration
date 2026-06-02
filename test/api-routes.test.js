@@ -94,6 +94,9 @@ describe('REST API routes', () => {
       listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
       salesPrice: 10, qtyOnHand: 50, isActive: true,
     });
+    // After Fix 3, rescue triggers 422 if staff_followup_notes is empty AND
+    // an auto-match/auto-promote occurred. Pass non-empty notes so the test
+    // continues to assert the auto-promote behaviour, not the 422 path.
     const res = await makeRequest(port, 'POST', '/api/order', {
       headers: { 'x-api-key': API_KEY },
       body: {
@@ -104,6 +107,7 @@ describe('REST API routes', () => {
           { name: 'Accessory: 4" Silver Flex Bag', qty: 2, rate: 0 },
           { name: 'Accessory: SS2', qty: 1, rate: 0 },
         ],
+        staff_followup_notes: '2x 4" Silver Flex Bag, 1x SS2 (caller request — verify)',
       },
     });
     assert.equal(res.statusCode, 202);
@@ -146,6 +150,184 @@ describe('REST API routes', () => {
       body: { customer_name: 'Acme', items: [] },
     });
     assert.equal(res.statusCode, 400);
+  });
+
+  // ─── Fix 1: lookup_part evidence gate ────────────────────────
+
+  it('Fix 1: parts/search with call_id records hits to call_lookup_history', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SLV04', name: 'SLV04', fullName: 'Flex:SLV04',
+      salesPrice: 37.97, qtyOnHand: 100, isActive: true,
+    });
+    const res = await makeRequest(port, 'GET',
+      '/api/parts/search?q=4%20silver%20flex&call_id=call_test_F1A', {
+        headers: { 'x-api-key': API_KEY },
+      });
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.count >= 1);
+
+    const callHistory = require('../db/call-history');
+    const hits = callHistory.getHitsForCall('call_test_F1A');
+    assert.ok(hits.length >= 1, 'expected at least one recorded hit');
+    assert.ok(hits.some((h) => h.qb_item_name === 'Flex:SLV04'),
+      'expected Flex:SLV04 in the recorded hits');
+  });
+
+  it('Fix 1: parts/search without call_id still works (no logging)', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SLV04', name: 'SLV04', fullName: 'Flex:SLV04',
+      salesPrice: 37.97, qtyOnHand: 100, isActive: true,
+    });
+    const res = await makeRequest(port, 'GET',
+      '/api/parts/search?q=4%20silver%20flex', {
+        headers: { 'x-api-key': API_KEY },
+      });
+    assert.equal(res.statusCode, 200);
+    const callHistory = require('../db/call-history');
+    assert.equal(callHistory.getHitsForCall('call_test_F1A').length, 0);
+  });
+
+  it('Fix 1: order with call_id + lookup history -> 202 (tier-2 pass, no auto-match)', async () => {
+    // Seed real inventory + record a lookup_part hit for this call_id, so the
+    // material doesn't need auto-match. tier-2 evidence gate alone passes it.
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, isActive: true,
+    });
+    cache.upsertInventoryItem({
+      listId: 'LID-MASTIC', name: 'White Mastic 1 Gallon PA',
+      fullName: 'Mastic:White Mastic 1 Gallon PA',
+      salesPrice: 19.75, isActive: true,
+    });
+    const callHistory = require('../db/call-history');
+    callHistory.recordLookupHit({
+      call_id: 'call_test_F1B',
+      qb_item_name: 'Mastic:White Mastic 1 Gallon PA',
+      search_query: 'bucket of mastic',
+    });
+
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        call_id: 'call_test_F1B',
+        items: [
+          { name: 'Widget A', qty: 1, rate: 10 },
+          { name: 'Mastic:White Mastic 1 Gallon PA', qty: 1, rate: 19.75 },
+        ],
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.status, 'queued');
+    // No auto_matched / auto_followup — both items passed via tier-1 or tier-2
+    assert.equal(res.body.auto_matched_items, undefined);
+    assert.equal(res.body.auto_followup_items, undefined);
+  });
+
+  it('Fix 1: order without call_id falls back to auto-match (back-compat)', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SLV04', name: 'SLV04', fullName: 'Flex:SLV04',
+      salesPrice: 37.97, isActive: true,
+    });
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [
+          { name: 'Widget A', qty: 1, rate: 10 },
+          { name: '4 inch silver flex bag', qty: 2, rate: 0 },
+        ],
+        staff_followup_notes: '2x 4" silver flex (caller request)',
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.auto_matched_items.length, 1);
+    assert.equal(res.body.auto_matched_items[0].resolved_name, 'Flex:SLV04');
+  });
+
+  // ─── Fix 3: mandatory staff_followup_notes when auto-match triggers ──
+
+  it('Fix 3: auto-match + empty notes -> 422 (staff_followup_notes_required)', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-SLV04', name: 'SLV04', fullName: 'Flex:SLV04',
+      salesPrice: 37.97, isActive: true,
+    });
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [
+          { name: 'Widget A', qty: 1, rate: 10 },
+          { name: '4 inch silver flex bag', qty: 2, rate: 0 },
+        ],
+        // staff_followup_notes intentionally omitted
+      },
+    });
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.error, 'staff_followup_notes_required');
+    assert.equal(res.body.auto_matched_items[0].resolved_name, 'Flex:SLV04');
+  });
+
+  it('Fix 3: auto-followup + empty notes -> 422', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [
+          { name: 'Widget A', qty: 1, rate: 10 },
+          { name: 'Quantum Plasma Widget XJ-9', qty: 1, rate: 0 },
+        ],
+      },
+    });
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.error, 'staff_followup_notes_required');
+    assert.deepEqual(res.body.auto_followup_candidates, ['Quantum Plasma Widget XJ-9']);
+  });
+
+  it('Fix 3: all items catalog-valid + empty notes -> 202 (no enforcement)', async () => {
+    cache.upsertInventoryItem({
+      listId: 'LID-WGT', name: 'Widget A', fullName: 'Widget A',
+      salesPrice: 10, isActive: true,
+    });
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': API_KEY },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [{ name: 'Widget A', qty: 1, rate: 10 }],
+      },
+    });
+    assert.equal(res.statusCode, 202);
+  });
+
+  // ─── Admin call-history endpoints ─────────────────────────────
+
+  it('GET /api/admin/call-history/:call_id returns hits', async () => {
+    const callHistory = require('../db/call-history');
+    callHistory.recordLookupHit({
+      call_id: 'call_admin_test',
+      qb_item_name: 'Flex:SLV06',
+      search_query: '6 inch flex',
+      sales_price: 47.66,
+    });
+    const res = await makeRequest(port, 'GET',
+      '/api/admin/call-history/call_admin_test', {
+        headers: { 'x-api-key': API_KEY },
+      });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.hit_count, 1);
+    assert.equal(res.body.hits[0].qb_item_name, 'Flex:SLV06');
   });
 
   // ─── POST /api/invoice ──────────────────────────────────────

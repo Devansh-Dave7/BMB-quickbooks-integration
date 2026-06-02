@@ -1,11 +1,23 @@
 const { wrapInEnvelope } = require('./envelope');
 
 /**
- * Escape XML special characters.
+ * Escape XML special characters. Also coerces non-ASCII chars to plain
+ * ASCII equivalents before escaping, because QuickBooks Desktop's qbXML
+ * parser chokes on certain Unicode codepoints in memo fields (em-dash
+ * U+2014 caused error 0x80040400 in the wild on 2026-06-02). Smart
+ * quotes, em/en dashes, ellipsis, and the rightwards arrow are mapped
+ * to ASCII equivalents; anything else outside 0x20-0x7E is dropped.
  */
 function escXml(str) {
   if (str == null) return '';
-  return String(str)
+  const ascii = String(str)
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[“”„‟]/g, '"')
+    .replace(/[–—―]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/[→➜➞]/g, '->')
+    .replace(/[^\x20-\x7E\r\n\t]/g, '');
+  return ascii
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

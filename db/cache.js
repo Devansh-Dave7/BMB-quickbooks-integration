@@ -167,9 +167,26 @@ const PARTS_NUMBER_WORDS = {
  *   addTokens:  extra canonical tokens to AND into the search
  */
 const BMB_PARTS_ALIASES = [
-  // Float switch — many caller phrasings, all map to one QB item.
-  { pat: /\b(s\s*\.?\s*s\s*\.?\s*2|s\s*\.?\s*s\s*\.?\s*two|sst?\s+float\s+switch|float\s+switch|safety\s+switch|drain\s+switch)\b/gi,
+  // SS3 float switch — must come BEFORE the SS2 catch-all. Greedy: the
+  // pattern eats the optional trailing "float switch" so SS2's catch-all
+  // (which also matches bare "float switch") can't fire after SS3 removed
+  // its own token.
+  { pat: /\b(?:ss[-\s.]*3|s\s*\.?\s*s\s*\.?\s*three)(?:\s+(?:float|safety|drain)\s+switch)?\b/gi,
+    category: 'Drain Pans&Accessories:SS3', removeMatch: true },
+  // Float switch (SS2) — many caller phrasings, all map to one QB item.
+  // The SS2-marked patterns also eat the trailing "float switch" so the
+  // bare-"float switch" catch-all at the end doesn't double-fire.
+  { pat: /\b(?:ss[-\s.]*2|s\s*\.?\s*s\s*\.?\s*two|sst)(?:\s+(?:float|safety|drain)\s+switch)?\b/gi,
     category: 'Drain Pans&Accessories:SS2', removeMatch: true },
+  // Bare "float / safety / drain switch" — defaults to SS2 when no SS2/SS3
+  // marker is present.
+  { pat: /\b(?:float|safety|drain)\s+switch\b/gi,
+    category: 'Drain Pans&Accessories:SS2', removeMatch: true },
+  // Silver duct tape (Fasson UL181 2.5" 0800). Lewis confirmed this is the
+  // canonical "silver tape" item — must come BEFORE the standalone `silver`
+  // remover, otherwise the silver token is dropped and we lose the signal.
+  { pat: /\b(silver\s+(?:duct\s+)?tape(?:\s+roll)?|fasson\s+silver(?:\s+tape)?)\b/gi,
+    category: 'Tape:Fasson UL181', removeMatch: true },
   // Silver flex / KM R6 bag → Flex:SLV* category.
   { pat: /\bsilver\s+flex(?:\s+bag)?\b/gi,
     category: 'Flex:SLV', removeMatch: true },
@@ -191,13 +208,19 @@ const BMB_PARTS_ALIASES = [
   // they get a chance to remove their phrase first.
   { pat: /\bflex\b/gi, category: 'Flex:SLV', removeMatch: true },
   // Tab / flat tap / saddle tap collars — distinct categories.
-  { pat: /\bflat\s+tap(?:\s+collar)?/gi, category: 'Flat Tap Collar:', removeMatch: true },
-  { pat: /\bsaddle\s+tap/gi, category: 'Saddle Taps:', removeMatch: true },
-  { pat: /\btab\s+collar/gi, category: 'Tab Collars:', removeMatch: true },
+  // Extended trailing-"collar(s)" capture so callers saying "flat tap collar"
+  // / "saddle tap collars" don't leave a dangling "collar" token that fails
+  // to AND-match against items whose names don't carry the word "collar"
+  // (e.g. Saddle Taps:ST08 has no "collar" in any field).
+  // "Flat top collar" is an ASR mishear of "flat TAP collar" and routes to
+  // the same FTC* category.
+  { pat: /\b(?:flat\s+(?:tap|top))(?:\s+collars?)?/gi, category: 'Flat Tap Collar:', removeMatch: true },
+  { pat: /\bsaddle\s+taps?(?:\s+collars?)?/gi, category: 'Saddle Taps:', removeMatch: true },
+  { pat: /\btab\s+collars?/gi, category: 'Tab Collars:', removeMatch: true },
   // "Cap collar" / "tap collar" — frequent ASR mishears of "tab collar".
   // Both Tab Collars and Flat Tap Collar live in BMB's catalog; default to
   // Tab Collars (TC*) which is the higher-volume SKU family.
-  { pat: /\b(cap|tap)\s+collar\b/gi, category: 'Tab Collars:', removeMatch: true },
+  { pat: /\b(cap|tap)\s+collars?\b/gi, category: 'Tab Collars:', removeMatch: true },
   // Drain pans + hurricane condenser pads.
   { pat: /\bdrain\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
   { pat: /\bhurricane\s+pad/gi, category: 'Condenser Pads:Hurricane', removeMatch: true },
@@ -388,6 +411,12 @@ function searchParts(query, { limit = 25 } = {}) {
            ${skuBoost} AS sku_boost
     FROM inventory_cache ic
     WHERE ic.is_active = 1
+      -- Exclude parent-category folder rows (e.g. the literal "Tape" or
+      -- "Saddle Taps" rows with sales_price=null). These aren't real items
+      -- and break orders: validateItemsExist used to accept them and the
+      -- order would land in QB at $0. Folder rows are characterised by a
+      -- null sales_price.
+      AND ic.sales_price IS NOT NULL
       ${categoryClause}
       ${tokenWhereClause}
       AND NOT EXISTS (

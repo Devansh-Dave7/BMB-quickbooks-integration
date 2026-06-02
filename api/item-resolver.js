@@ -184,9 +184,15 @@ function isCatalogValid(name) {
     SELECT 1 FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE LIMIT 1
   `).get(name);
   if (pm) return true;
+  // Require sales_price IS NOT NULL — exclude parent-category folder rows
+  // like "Tape" / "Saddle Taps" which QB syncs as null-priced inventory
+  // headers. Without this guard Sophia could fabricate "Tape" as a
+  // qb_item_name and the order would land at $0 with no real product.
   const ic = db.prepare(`
     SELECT 1 FROM inventory_cache
-    WHERE is_active = 1 AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    WHERE is_active = 1
+      AND sales_price IS NOT NULL
+      AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
     LIMIT 1
   `).get(name, name);
   return !!ic;

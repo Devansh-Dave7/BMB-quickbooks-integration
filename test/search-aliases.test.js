@@ -227,6 +227,23 @@ describe('canonicalizeItemName — tier-mismatch rescue 2026-06-04', () => {
     const v = canonicalizeItemName('3.5T 14.3 S2 HP Std-X');
     assert.equal(v[0], '3.5T 14.3 S2 HP Std-X');
   });
+
+  it('strips trailing " w/10kW" heat-kit editorial suffix', () => {
+    const v = canonicalizeItemName('4T 14.3 S2 HP Std-7AH1AE48PX w/10kW');
+    assert.ok(v.includes('4T 14.3 S2 HP Std-7AH1AE48PX'),
+      'expected stripped form: ' + JSON.stringify(v));
+    assert.ok(v.includes('4T 14.3 S2 HP Btr-7AH1AE48PX'),
+      'expected tier-canonicalized + stripped form: ' + JSON.stringify(v));
+  });
+
+  it('strips other "with NkW" variants', () => {
+    const a = canonicalizeItemName('4T 14.3 S2 HP Std-X with 10 kW heat kit');
+    assert.ok(a.includes('4T 14.3 S2 HP Std-X'));
+    const b = canonicalizeItemName('4T 14.3 S2 HP Std-X + 5kW heat strip');
+    assert.ok(b.includes('4T 14.3 S2 HP Std-X'));
+    const c = canonicalizeItemName('4T 14.3 S2 HP Std-X /10kW');
+    assert.ok(c.includes('4T 14.3 S2 HP Std-X'));
+  });
 });
 
 describe('isCatalogValid — tier-mismatch rescue 2026-06-04', () => {

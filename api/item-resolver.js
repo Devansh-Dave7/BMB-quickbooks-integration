@@ -32,21 +32,46 @@ const cache = require('../db/cache');
 function canonicalizeItemName(name) {
   if (!name || typeof name !== 'string') return [name];
   const variants = [name];
+
+  // Strip Sophia's editorial suffixes. Lewis's 525s call_c1a92531 had her
+  // sending '4T 14.3 S2 HP Std-7AH1AE48PX w/10kW' — the trailing " w/10kW"
+  // is heat-kit info she appended to the HP qb_item_name. Strip these to
+  // try the bare name first, then apply tier substitution to the stripped
+  // form. Patterns covered:
+  //   ' w/10kW' / ' w/ 10kW' / ' w/10 kW' / ' w/10k'
+  //   ' /10kW' / ' with 10kW' / ' with 10 kW heat kit'
+  //   ' + 10kW heat strip'
+  const suffixRx = /\s*(?:[wW]\/|\/|with|\+)\s*\d+(?:\.\d+)?\s*k?\s*[wW](?:\s*(?:heat\s+kit|heat\s+strip|kit|strip))?$/;
+  const stripped = name.replace(suffixRx, '');
+  if (stripped !== name) {
+    variants.push(stripped);
+  }
+
+  // For each variant so far, also expand tier abbreviations.
   // "X Std-Y" -> ["X Std-Y", "X Btr-Y", "X Gd-Y", "X Bst-Y"]
-  const stdMatch = name.match(/\bStd-/);
-  if (stdMatch) {
-    for (const tier of ['Btr-', 'Gd-', 'Bst-']) {
-      variants.push(name.replace(/\bStd-/, tier));
+  const base = variants.slice();
+  for (const v of base) {
+    if (/\bStd-/.test(v)) {
+      for (const tier of ['Btr-', 'Gd-', 'Bst-']) {
+        variants.push(v.replace(/\bStd-/, tier));
+      }
+    }
+    // Full-word forms: "Standard-" / "Good-" / "Better-" / "Best-"
+    const fullTier = v.match(/\b(Standard|Good|Better|Best)-/);
+    if (fullTier) {
+      const map = { Standard: 'Btr-', Good: 'Gd-', Better: 'Btr-', Best: 'Bst-' };
+      const abbrev = map[fullTier[1]];
+      if (abbrev) variants.push(v.replace(/\b(Standard|Good|Better|Best)-/, abbrev));
     }
   }
-  // Defensive: "Standard-" / "Good-" / "Better-" / "Best-" full-word forms
-  const fullTier = name.match(/\b(Standard|Good|Better|Best)-/);
-  if (fullTier) {
-    const map = { Standard: 'Btr-', Good: 'Gd-', Better: 'Btr-', Best: 'Bst-' };
-    const abbrev = map[fullTier[1]];
-    if (abbrev) variants.push(name.replace(/\b(Standard|Good|Better|Best)-/, abbrev));
-  }
-  return variants;
+
+  // Dedupe while preserving order (original first).
+  const seen = new Set();
+  return variants.filter((v) => {
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return true;
+  });
 }
 
 /**

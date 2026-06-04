@@ -8,7 +8,7 @@ const log = require('../db/log');
 const templates = require('../qbxml/templates');
 const {
   resolveOrderItems, validateItemsExist, formatFollowupLine, attemptAutoMatch,
-  isCatalogValid,
+  isCatalogValid, normalizeFabricatedName,
 } = require('./item-resolver');
 const callHistory = require('../db/call-history');
 
@@ -639,12 +639,17 @@ router.post('/inventory/add', validate(validateInventoryAddPayload), (req, res) 
 // (mastic, flex, line sets, accessories...) instead of fabricating QB names.
 
 router.get('/parts/search', (req, res) => {
-  const q = (req.query.q || req.query.query || '').toString().trim();
-  if (!q) {
+  const qRaw = (req.query.q || req.query.query || '').toString().trim();
+  if (!qRaw) {
     return res.status(400).json({ error: 'Missing required query param `q`' });
   }
   const limit = Math.min(parseInt(req.query.limit, 10) || 25, 50);
   const call_id = (req.query.call_id || '').toString().trim() || null;
+  // Defensive: if Sophia accidentally queries with one of her slug
+  // placeholders ("Accessory-Flex-4in"), run it through the same decoder
+  // the auto-match path uses. Caller-words queries are unchanged.
+  const qNorm = normalizeFabricatedName(qRaw);
+  const q = qNorm || qRaw;
   const items = cache.searchParts(q, { limit });
 
   // Fix 1: record each lookup_part hit against the call_id so a later

@@ -228,7 +228,9 @@ const BMB_PARTS_ALIASES = [
   // Tab Collars (TC*) which is the higher-volume SKU family.
   { pat: /\b(cap|tap)\s+collars?\b/gi, category: 'Tab Collars:', removeMatch: true },
   // Drain pans + hurricane condenser pads.
-  { pat: /\bdrain\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
+  // "Drink pan" is a frequent ASR mishear of "drain pan" — same family as
+  // the existing flat-top/cap-collar/tap-collar mishears. Same target.
+  { pat: /\b(?:drain|drink)\s+pan/gi, category: 'Drain Pans&Accessories:', removeMatch: true },
   { pat: /\bhurricane\s+pad/gi, category: 'Condenser Pads:Hurricane', removeMatch: true },
   { pat: /\bcondenser\s+pad/gi, category: 'Condenser Pads:', removeMatch: true },
   { pat: /\b(pad\s+bracket|hurricane\s+bracket|cond\s+pad\s+bracket)\b/gi, category: 'Condenser Pads:Cond Pad', removeMatch: true },

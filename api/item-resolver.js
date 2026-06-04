@@ -16,16 +16,57 @@ const { applyPriceLevelToItem } = require('../db/pricing');
 const cache = require('../db/cache');
 
 /**
+ * Sophia routinely emits split-system names with a tier abbreviation that
+ * doesn't exist in pricing_metadata — typically "Std-7AH1AE42PX" when the
+ * catalog actually has "Btr-7AH1AE42PX" (prompt tells her to call the
+ * Better tier "Standard" to the caller, and she leaks that wording into
+ * the qb_item_name). 2026-06-04 Call B (TXN 90B2BC) lost the entire
+ * $3782 heat pump because of this — "3.5T 14.3 S2 HP Std-7AH1AE42PX"
+ * had no pricing_metadata row so the whole bundle dropped to followup.
+ *
+ * This helper takes a qb_item_name and returns a list of plausible
+ * canonical variants to try in order. The original name is always first.
+ * Tier abbreviations BMB uses: Gd (Good/PSC), Btr (Better/ECM),
+ * Bst (Best/Variable). "Std" is Sophia's invention.
+ */
+function canonicalizeItemName(name) {
+  if (!name || typeof name !== 'string') return [name];
+  const variants = [name];
+  // "X Std-Y" -> ["X Std-Y", "X Btr-Y", "X Gd-Y", "X Bst-Y"]
+  const stdMatch = name.match(/\bStd-/);
+  if (stdMatch) {
+    for (const tier of ['Btr-', 'Gd-', 'Bst-']) {
+      variants.push(name.replace(/\bStd-/, tier));
+    }
+  }
+  // Defensive: "Standard-" / "Good-" / "Better-" / "Best-" full-word forms
+  const fullTier = name.match(/\b(Standard|Good|Better|Best)-/);
+  if (fullTier) {
+    const map = { Standard: 'Btr-', Good: 'Gd-', Better: 'Btr-', Best: 'Bst-' };
+    const abbrev = map[fullTier[1]];
+    if (abbrev) variants.push(name.replace(/\b(Standard|Good|Better|Best)-/, abbrev));
+  }
+  return variants;
+}
+
+/**
  * Look up a pricing_metadata row by its qb_item_name, then resolve
  * outdoor_model / indoor_model against inventory_cache for full_name + price.
  */
 function resolveItem(itemName, priceLevel = null) {
   const db = getDb();
 
-  // Find the pricing metadata entry
-  const pm = db.prepare(`
+  // Try the original name first, then tier-canonicalized variants.
+  // This is what rescues 3.5T heat pumps when Sophia uses "Std-" in the
+  // qb_item_name.
+  const stmt = db.prepare(`
     SELECT * FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE
-  `).get(itemName);
+  `);
+  let pm = null;
+  for (const candidate of canonicalizeItemName(itemName)) {
+    pm = stmt.get(candidate);
+    if (pm) break;
+  }
 
   if (!pm) return null;
 
@@ -48,7 +89,10 @@ function resolveItem(itemName, priceLevel = null) {
     if (ic) {
       outdoorFound = true;
       const fullName = ic.full_name || ic.name;
-      const listRate = ic.sales_price;
+      // Fall back to pricing_metadata.outdoor_price when inventory_cache hasn't
+      // synced a sales_price yet (or the row is a placeholder). Without this
+      // fallback the bundle lands in QB at $0.
+      const listRate = ic.sales_price != null ? ic.sales_price : pm.outdoor_price;
       const rate = applyPriceLevelToItem(listRate, fullName, priceLevel);
       result.parts.push({
         name: fullName,
@@ -70,7 +114,7 @@ function resolveItem(itemName, priceLevel = null) {
     if (ic) {
       indoorFound = true;
       const fullName = ic.full_name || ic.name;
-      const listRate = ic.sales_price;
+      const listRate = ic.sales_price != null ? ic.sales_price : pm.indoor_price;
       const rate = applyPriceLevelToItem(listRate, fullName, priceLevel);
       result.parts.push({
         name: fullName,
@@ -144,11 +188,17 @@ function resolveOrderItems(items, priceLevel = null) {
 
     const direct = resolveInventoryDirect(item.name, priceLevel);
     if (direct) {
+      // Catalog wins over Sophia's rate when she sends 0 (or missing).
+      // Earlier behaviour preferred any non-null rate, but Sophia's bare
+      // `name: 'SS2', rate: 0` submissions were landing in QB at $0
+      // instead of $23.88. Treat rate <= 0 as "not provided" so the
+      // catalog price always carries a legitimate inventory row.
+      const sophiaRate = (item.rate != null && item.rate > 0) ? item.rate : null;
       resolved.push({
         name: direct.name,
         description: item.description,
         qty: item.qty || 1,
-        rate: item.rate != null ? item.rate : direct.sales_price,
+        rate: sophiaRate != null ? sophiaRate : direct.sales_price,
       });
       continue;
     }
@@ -180,10 +230,14 @@ function resolveOrderItems(items, priceLevel = null) {
 function isCatalogValid(name) {
   if (!name || typeof name !== 'string') return false;
   const db = getDb();
-  const pm = db.prepare(`
+  // Pricing metadata: try original name + any tier-canonicalized variants
+  // (Std- -> Btr-/Gd-/Bst-). Same rescue resolveItem applies.
+  const stmtPm = db.prepare(`
     SELECT 1 FROM pricing_metadata WHERE qb_item_name = ? COLLATE NOCASE LIMIT 1
-  `).get(name);
-  if (pm) return true;
+  `);
+  for (const candidate of canonicalizeItemName(name)) {
+    if (stmtPm.get(candidate)) return true;
+  }
   // Require sales_price IS NOT NULL — exclude parent-category folder rows
   // like "Tape" / "Saddle Taps" which QB syncs as null-priced inventory
   // headers. Without this guard Sophia could fabricate "Tape" as a
@@ -330,4 +384,5 @@ module.exports = {
   formatFollowupLine,
   attemptAutoMatch,
   normalizeFabricatedName,
+  canonicalizeItemName,
 };

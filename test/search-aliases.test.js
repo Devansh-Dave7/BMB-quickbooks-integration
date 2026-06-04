@@ -201,6 +201,98 @@ describe('attemptAutoMatch — handles Sophia slug payloads 2026-06-04', () => {
   });
 });
 
+describe('canonicalizeItemName — tier-mismatch rescue 2026-06-04', () => {
+  const { canonicalizeItemName } = require('../api/item-resolver');
+
+  it('expands Std- to Btr-/Gd-/Bst- variants', () => {
+    const v = canonicalizeItemName('3.5T 14.3 S2 HP Std-7AH1AE42PX');
+    assert.ok(v.includes('3.5T 14.3 S2 HP Std-7AH1AE42PX'));
+    assert.ok(v.includes('3.5T 14.3 S2 HP Btr-7AH1AE42PX'));
+    assert.ok(v.includes('3.5T 14.3 S2 HP Gd-7AH1AE42PX'));
+    assert.ok(v.includes('3.5T 14.3 S2 HP Bst-7AH1AE42PX'));
+  });
+
+  it('expands full-word tier (Better-) too', () => {
+    const v = canonicalizeItemName('3.5T 14.3 S2 HP Better-7AH1AE42PX');
+    assert.ok(v.includes('3.5T 14.3 S2 HP Better-7AH1AE42PX'));
+    assert.ok(v.includes('3.5T 14.3 S2 HP Btr-7AH1AE42PX'));
+  });
+
+  it('leaves names without a known tier untouched', () => {
+    const v = canonicalizeItemName('Heat Kit-ECB45-7.5-P (SS)');
+    assert.deepEqual(v, ['Heat Kit-ECB45-7.5-P (SS)']);
+  });
+
+  it('original name is always first in the list', () => {
+    const v = canonicalizeItemName('3.5T 14.3 S2 HP Std-X');
+    assert.equal(v[0], '3.5T 14.3 S2 HP Std-X');
+  });
+});
+
+describe('isCatalogValid — tier-mismatch rescue 2026-06-04', () => {
+  before(() => setupTestDb());
+  after(() => teardownTestDb());
+  beforeEach(() => clearAllTables());
+
+  it('Std-X passes when only Btr-X exists in pricing_metadata', () => {
+    const { getDb } = require('../db/schema');
+    const db = getDb();
+    db.prepare(`INSERT INTO pricing_metadata (category, qb_item_name, tonnage)
+                VALUES ('heat_pump', '3.5T 14.3 S2 HP Btr-7AH1AE42PX', 3.5)`).run();
+    // Sophia's Std- form should pass the tier-canonicalized lookup
+    assert.equal(isCatalogValid('3.5T 14.3 S2 HP Std-7AH1AE42PX'), true);
+    // The original Btr- form still passes
+    assert.equal(isCatalogValid('3.5T 14.3 S2 HP Btr-7AH1AE42PX'), true);
+    // A nonsense name still fails
+    assert.equal(isCatalogValid('Floogleflorp 9000'), false);
+  });
+});
+
+describe('resolveOrderItems — rate=0 fallback 2026-06-04', () => {
+  const { resolveOrderItems } = require('../api/item-resolver');
+  before(() => setupTestDb());
+  after(() => teardownTestDb());
+  beforeEach(() => clearAllTables());
+
+  it('bare name with rate=0 uses catalog sales_price', () => {
+    cache.upsertInventoryItem({ listId: 'SS2', name: 'SS2',
+      fullName: 'Drain Pans&Accessories:SS2', salesPrice: 23.88, isActive: true });
+    const out = resolveOrderItems([{ name: 'SS2', qty: 2, rate: 0 }]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].name, 'Drain Pans&Accessories:SS2');
+    assert.equal(out[0].rate, 23.88);  // Sophia's 0 OVERRIDDEN by catalog
+  });
+
+  it('non-zero rate from Sophia still wins (legitimate override)', () => {
+    cache.upsertInventoryItem({ listId: 'SS2', name: 'SS2',
+      fullName: 'Drain Pans&Accessories:SS2', salesPrice: 23.88, isActive: true });
+    const out = resolveOrderItems([{ name: 'SS2', qty: 1, rate: 20 }]);  // discount
+    assert.equal(out[0].rate, 20);
+  });
+
+  it('missing rate also uses catalog sales_price', () => {
+    cache.upsertInventoryItem({ listId: 'SS2', name: 'SS2',
+      fullName: 'Drain Pans&Accessories:SS2', salesPrice: 23.88, isActive: true });
+    const out = resolveOrderItems([{ name: 'SS2', qty: 1 }]);
+    assert.equal(out[0].rate, 23.88);
+  });
+});
+
+describe('searchParts — drink/drain pan ASR alias 2026-06-04', () => {
+  before(() => setupTestDb());
+  after(() => teardownTestDb());
+  beforeEach(() => clearAllTables());
+
+  it('"drink pan" routes to Drain Pans&Accessories (same as "drain pan")', () => {
+    cache.upsertInventoryItem({ listId: 'DP2424', name: 'DP2424',
+      fullName: 'Drain Pans&Accessories:DP2424', salesPrice: 28.69, isActive: true });
+    const a = cache.searchParts('24x24 drain pan', { limit: 3 });
+    const b = cache.searchParts('24x24 drink pan', { limit: 3 });
+    assert.ok(a.length > 0); assert.equal(a[0].full_name, 'Drain Pans&Accessories:DP2424');
+    assert.ok(b.length > 0); assert.equal(b[0].full_name, 'Drain Pans&Accessories:DP2424');
+  });
+});
+
 describe('isCatalogValid — folder-row guard 2026-06-02', () => {
   before(() => setupTestDb());
   after(() => teardownTestDb());

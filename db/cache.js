@@ -185,8 +185,14 @@ const BMB_PARTS_ALIASES = [
   // Silver duct tape (Fasson UL181 2.5" 0800). Lewis confirmed this is the
   // canonical "silver tape" item — must come BEFORE the standalone `silver`
   // remover, otherwise the silver token is dropped and we lose the signal.
-  { pat: /\b(silver\s+(?:duct\s+)?tape(?:\s+roll)?|fasson\s+silver(?:\s+tape)?)\b/gi,
+  // Accepts both orderings ("silver tape", "tape silver") because Sophia's
+  // slug normalizer can emit either ("Accessory-Tape-Silver" -> "Tape Silver").
+  { pat: /\b(silver\s+(?:duct\s+)?tape(?:\s+roll)?|fasson\s+silver(?:\s+tape)?|tape\s+silver)\b/gi,
     category: 'Tape:Fasson UL181', removeMatch: true },
+  // Black tape — generic category prefix; the highest-volume black tape is
+  // Tape:Black DC UL 181B Flex Pro but we let token scoring pick.
+  { pat: /\b(black\s+tape|tape\s+black)\b/gi,
+    category: 'Tape:Black', removeMatch: true },
   // Silver flex / KM R6 bag → Flex:SLV* category.
   { pat: /\bsilver\s+flex(?:\s+bag)?\b/gi,
     category: 'Flex:SLV', removeMatch: true },

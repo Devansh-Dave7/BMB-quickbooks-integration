@@ -235,12 +235,55 @@ function validateItemsExist(items) {
 }
 
 /**
+ * Decode Sophia's "obvious placeholder" qb_item_name patterns so the
+ * synonym map gets a normal phrase to work with. She emits two families
+ * of fabrications:
+ *
+ *   1. "Accessory: 4\" Silver Flex Bag"   — colon + caller-words (handled
+ *                                          since 2026-05-06)
+ *   2. "Accessory-Flex-4in"               — dash-separated CamelCase slug
+ *                                          (2026-06-04 — call_e361929f).
+ *                                          17 of 17 materials slipped past
+ *                                          auto-match because the slug stays
+ *                                          as one token and matches nothing.
+ *
+ * Pipeline: strip the leading marker, replace dashes/underscores with
+ * spaces, split CamelCase ("TabCollar" -> "Tab Collar"), and expand the
+ * compact size suffixes Sophia uses ("4in" -> "4 inch", "5ft" -> "5 foot").
+ * The downstream synonym map (BMB_PARTS_ALIASES) then matches normally.
+ */
+function normalizeFabricatedName(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim();
+  // Strip leading marker — Accessory:, Accessory-, Accessory_, "Accessory "
+  s = s.replace(/^accessory[-:_\s]+/i, '');
+  // Strip any other "Accessory-" inside the string too (defensive)
+  s = s.replace(/\baccessory[-_]/gi, '');
+  // Dashes / underscores -> spaces so "Flex-4in" -> "Flex 4in"
+  s = s.replace(/[-_]+/g, ' ');
+  // Split CamelCase: insert space between lowercase->uppercase and between
+  // uppercase->uppercase+lowercase (so "TabCollar" -> "Tab Collar",
+  // "DrainPan" -> "Drain Pan", "FlatTap" -> "Flat Tap").
+  s = s.replace(/([a-z])([A-Z])/g, '$1 $2');
+  s = s.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  // Expand compact size suffixes: "4in" -> "4 inch", "5ft" -> "5 foot",
+  // "10gal" -> "10 gallon". Trailing-only — don't expand "into" or similar.
+  s = s.replace(/(\d+(?:\.\d+)?)\s*in\b/gi, '$1 inch');
+  s = s.replace(/(\d+(?:\.\d+)?)\s*ft\b/gi, '$1 foot');
+  s = s.replace(/(\d+(?:\.\d+)?)\s*gal\b/gi, '$1 gallon');
+  // Collapse double spaces
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+/**
  * Format an unmatched line item into a single human-readable bullet for the
- * staff_followup_notes memo. Strips the "Accessory:" prefix Sophia sometimes
- * fabricates and includes the quantity so staff know how many to bill.
+ * staff_followup_notes memo. Uses normalizeFabricatedName so memo lines
+ * read as caller-friendly text (e.g. "2x Flex 4 inch" rather than
+ * "2x Accessory-Flex-4in") and quantity is preserved.
  */
 function formatFollowupLine(item) {
-  const raw = String((item && item.name) || '').replace(/^accessory:\s*/i, '').trim();
+  const raw = normalizeFabricatedName(String((item && item.name) || ''));
   const qty = Number(item && item.qty) || 1;
   return `${qty}x ${raw} (caller's wording, not in catalog)`;
 }
@@ -258,19 +301,23 @@ function formatFollowupLine(item) {
  * Quantity carries through.
  */
 function attemptAutoMatch(item) {
-  const rawName = String((item && item.name) || '').replace(/^accessory:\s*/i, '').trim();
+  const rawInput = String((item && item.name) || '').trim();
+  const rawName = normalizeFabricatedName(rawInput);
   if (!rawName) return null;
   const hits = cache.searchParts(rawName, { limit: 1 });
   if (!hits || hits.length === 0) return null;
   const top = hits[0];
   const fullName = top.full_name || top.name;
   const price = top.sales_price;
+  // Audit line shows BOTH Sophia's original payload and the normalized
+  // form we actually searched on — staff need to be able to tell whether
+  // it was the slug-decoder or a literal alias that produced the match.
   return {
-    original: rawName,
+    original: rawInput,
     name: fullName,
     sales_price: price,
     qty: Number(item && item.qty) || 1,
-    audit_line: `AUTO-MATCHED: "${rawName}" → ${fullName}${price != null ? ` @ $${price}` : ''}`,
+    audit_line: `AUTO-MATCHED: "${rawInput}" -> ${fullName}${price != null ? ` @ $${price}` : ''}`,
   };
 }
 
@@ -282,4 +329,5 @@ module.exports = {
   validateItemsExist,
   formatFollowupLine,
   attemptAutoMatch,
+  normalizeFabricatedName,
 };

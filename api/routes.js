@@ -24,13 +24,14 @@ router.use(apiKeyAuth);
 
 /**
  * Locate the QB customer for order/invoice creation.
- * Prefers an exact match (company first, then person) so price level lookups
+ * Prefers an exact match (phone first — caller ID survives ASR garbling of
+ * spoken company names — then company, then person) so price level lookups
  * target the right wholesale account. Falls back to fuzzy name-only matching
  * for display purposes — but price level MUST NOT be applied to fuzzy matches,
  * which is why the result flags `isExact`.
  */
-function findCustomerForOrder(customerName, companyName) {
-  const exact = pricing.findCustomerForPricing(customerName, companyName);
+function findCustomerForOrder(customerName, companyName, phone) {
+  const exact = pricing.findCustomerForPricing(customerName, companyName, phone);
   if (exact) {
     return { customer: exact.customer, isExact: true, matched_on: exact.matched_on };
   }
@@ -316,7 +317,7 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   let customerMatch = null;
   let matchIsExact = false;
   if (!customer_ref) {
-    const match = findCustomerForOrder(customer_name, company_name);
+    const match = findCustomerForOrder(customer_name, company_name, customer_phone);
     if (match) {
       customerMatch = match.customer;
       matchIsExact = match.isExact;
@@ -455,7 +456,7 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   let customerMatch = null;
   let matchIsExact = false;
   if (!customer_ref) {
-    const match = findCustomerForOrder(customer_name, company_name);
+    const match = findCustomerForOrder(customer_name, company_name, customer_phone);
     if (match) {
       customerMatch = match.customer;
       matchIsExact = match.isExact;
@@ -788,16 +789,18 @@ router.get('/pricing', (req, res) => {
 // pricing preview when `category` is provided.
 
 router.get('/pricing/_/resolve-customer', (req, res) => {
-  const { customer, company, category } = req.query;
+  const { customer, company, category, phone } = req.query;
   const personName = customer || null;
   const companyName = company || null;
+  const callerPhone = phone || null;
 
-  const match = pricing.findCustomerForPricing(personName, companyName);
+  const match = pricing.findCustomerForPricing(personName, companyName, callerPhone);
 
   const out = {
     lookup: {
       customer_query: personName,
       company_query: companyName,
+      phone_query: pricing.normalizePhone(callerPhone),
       matched_customer: null,
       price_level: null,
     },
@@ -839,6 +842,7 @@ router.get('/pricing/_/resolve-customer', (req, res) => {
       category,
       personName,
       companyName,
+      phone: callerPhone,
     });
     const formatted = pricing.formatPricingResponse(resolved.rows, category, {
       customerMatch: resolved.customerMatch,
@@ -879,7 +883,7 @@ router.get('/pricing/_/resolve-customer', (req, res) => {
 
 router.get('/pricing/:category', (req, res) => {
   const { category } = req.params;
-  const { tonnage, tier, customer, company } = req.query;
+  const { tonnage, tier, customer, company, phone } = req.query;
 
   const validCategories = ['heat_pump', 'ac', 'inverter', 'package_unit', 'heat_kit', 'warranty'];
   if (!validCategories.includes(category)) {
@@ -890,20 +894,23 @@ router.get('/pricing/:category', (req, res) => {
   }
 
   const hasCustomerQuery =
-    (customer && String(customer).trim()) || (company && String(company).trim());
+    (customer && String(customer).trim()) ||
+    (company && String(company).trim()) ||
+    pricing.normalizePhone(phone);
 
   if (hasCustomerQuery) {
     const resolved = pricing.resolvePricingForCustomer({
       category,
       personName: customer,
       companyName: company,
+      phone,
       tonnage,
       tier,
     });
     const response = pricing.formatPricingResponse(resolved.rows, category, {
       customerMatch: resolved.customerMatch,
       priceLevelApplied: resolved.priceLevelApplied,
-      customerQuery: { person: customer, company },
+      customerQuery: { person: customer, company, phone: pricing.normalizePhone(phone) },
     });
     return res.json(response);
   }

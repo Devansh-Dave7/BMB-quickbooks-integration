@@ -357,15 +357,56 @@ function round2(n) {
 }
 
 /**
+ * Normalize a phone value to its last 10 digits (US numbers). QB phone
+ * fields are messy free text ("904-881-9453  Mike C", "+1 (904) 880-7925")
+ * and Retell sends E.164 ("+19048819453") — comparing the trailing 10
+ * digits makes them line up. Returns null when fewer than 10 digits.
+ */
+function normalizePhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D+/g, '');
+  if (digits.length < 10) return null;
+  return digits.slice(-10);
+}
+
+/**
+ * Find the QB customer whose phone matches the caller's number. Requires a
+ * UNIQUE match — if two customer records share the line we can't know which
+ * one is calling, and applying the wrong wholesale level is worse than
+ * quoting list. Scans active customers in JS because customer_cache.phone
+ * is free text that SQLite can't normalize in SQL.
+ *
+ * @returns {{customer: object, matched_on: string} | null}
+ */
+function findCustomerByPhone(phone) {
+  const norm = normalizePhone(phone);
+  if (!norm) return null;
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT * FROM customer_cache
+    WHERE is_active = 1 AND phone IS NOT NULL AND phone != ''
+  `).all();
+  const hits = rows.filter((r) => normalizePhone(r.phone) === norm);
+  if (hits.length === 1) return { customer: hits[0], matched_on: 'phone' };
+  return null;
+}
+
+/**
  * Locate the QB customer that should drive pricing resolution.
- * Company match is preferred (wholesale accounts usually carry price levels);
+ * Phone match wins when available — the caller ID is deterministic while
+ * spoken company names arrive ASR-garbled ("Mikey's main" for "Cash Account
+ * Mikey's Maintenance" cost a dealer their price level on 2026-07-08).
+ * Company match is next (wholesale accounts usually carry price levels);
  * person name is the fallback. Exact matches only — wrong customer → wrong
  * price is worse than quoting list.
  *
  * @returns {{customer: object, matched_on: string} | null}
  */
-function findCustomerForPricing(personName, companyName) {
+function findCustomerForPricing(personName, companyName, phone) {
   const db = getDb();
+
+  const byPhone = findCustomerByPhone(phone);
+  if (byPhone) return byPhone;
 
   if (companyName && String(companyName).trim()) {
     const q = String(companyName).trim();
@@ -527,18 +568,19 @@ function applyPriceLevel(row, priceLevel) {
  *
  * Fails open: missing customer / no level / stale cache all return list prices.
  */
-function resolvePricingForCustomer({ category, personName, companyName, tonnage, tier }) {
+function resolvePricingForCustomer({ category, personName, companyName, phone, tonnage, tier }) {
   const rows = getPricingByCategory(category, { tonnage, tier });
 
   const emptyQuery =
     (!personName || !String(personName).trim()) &&
-    (!companyName || !String(companyName).trim());
+    (!companyName || !String(companyName).trim()) &&
+    !normalizePhone(phone);
 
   if (emptyQuery) {
     return { rows, customerMatch: null, priceLevelApplied: null };
   }
 
-  const match = findCustomerForPricing(personName, companyName);
+  const match = findCustomerForPricing(personName, companyName, phone);
   if (!match) {
     log.logEvent({
       event: 'price_level_skipped',
@@ -547,6 +589,7 @@ function resolvePricingForCustomer({ category, personName, companyName, tonnage,
         context: 'pricing_lookup',
         person: personName || null,
         company: companyName || null,
+        phone: normalizePhone(phone),
         category,
       },
     });
@@ -627,5 +670,7 @@ module.exports = {
   applyPriceLevel,
   applyPriceLevelToItem,
   findCustomerForPricing,
+  findCustomerByPhone,
+  normalizePhone,
   resolvePricingForCustomer,
 };

@@ -566,3 +566,85 @@ describe('REST API routes', () => {
     assert.ok('cache_freshness' in res.body);
   });
 });
+
+describe('warranty intercept — SystemShield lines never reach QBXML (2026-08-13)', () => {
+  const { config, setupTestDb, teardownTestDb, clearAllTables, makeRequest } = require('./_setup');
+  const cache2 = require('../db/cache');
+  const { getDb } = require('../db/schema');
+  const express2 = require('express');
+  const apiRoutes2 = require('../api/routes');
+  let server; let port;
+
+  before(async () => {
+    setupTestDb();
+    const app = express2();
+    app.use(express2.json());
+    app.use('/api', apiRoutes2);
+    await new Promise((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => { port = server.address().port; resolve(); });
+    });
+  });
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    teardownTestDb();
+  });
+  beforeEach(() => clearAllTables());
+
+  function seedWarrantyAndEquipment() {
+    getDb().prepare(`INSERT INTO pricing_metadata (category, qb_item_name, csv_price)
+                     VALUES ('warranty', 'SystemShield Level B', 300)`).run();
+    cache2.upsertInventoryItem({
+      listId: 'HK75', name: 'Heat Kit-ECB45-7.5-P (SS)',
+      fullName: 'Heat Kit-ECB45-7.5-P (SS)', salesPrice: 160, isActive: true,
+    });
+  }
+
+  it('warranty + equipment -> 202, warranty converted to memo note, not in items', async () => {
+    seedWarrantyAndEquipment();
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': config.apiKey },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [
+          { name: 'Heat Kit-ECB45-7.5-P (SS)', qty: 1, rate: 160 },
+          { name: 'SystemShield Level B', qty: 1, rate: 300 },
+        ],
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.status, 'queued');
+    assert.equal(res.body.warranty_noted_items.length, 1);
+    assert.equal(res.body.warranty_noted_items[0].name, 'SystemShield Level B');
+    assert.equal(res.body.warranty_noted_items[0].price, 300);
+    assert.equal(res.body.staff_followup_recorded, true);
+  });
+
+  it('warranty-only order -> 400 with warranty-specific guidance', async () => {
+    seedWarrantyAndEquipment();
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': config.apiKey },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [{ name: 'SystemShield Level B', qty: 1, rate: 300 }],
+      },
+    });
+    assert.equal(res.statusCode, 400);
+    assert.ok(res.body.message.includes('standalone'));
+  });
+
+  it('warranty with rate=0 uses csv_price from pricing_metadata', async () => {
+    seedWarrantyAndEquipment();
+    const res = await makeRequest(port, 'POST', '/api/order', {
+      headers: { 'x-api-key': config.apiKey },
+      body: {
+        customer_name: 'Acme Corp',
+        items: [
+          { name: 'Heat Kit-ECB45-7.5-P (SS)', qty: 1, rate: 160 },
+          { name: 'SystemShield Level B', qty: 1, rate: 0 },
+        ],
+      },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.body.warranty_noted_items[0].price, 300);
+  });
+});

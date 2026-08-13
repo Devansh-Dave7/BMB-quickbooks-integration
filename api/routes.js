@@ -121,6 +121,7 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
   const lookupGated = [];            // tier 2 hits
   const autoMatched = [];            // tier 3 hits ({ original, name, sales_price, qty, audit_line })
   const stillUnmatched = [];         // tier 4 (followup-only)
+  const warrantyNoted = [];          // warranty lines converted to memo notes
   const suggestions = {};
   const invalidNames = [];           // names that didn't pass tier 1 (for audit)
 
@@ -134,10 +135,38 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
     ORDER BY CASE WHEN qty_on_hand > 0 THEN 0 ELSE 1 END, name COLLATE NOCASE
     LIMIT 5
   `);
+  // Warranty catalog entries exist only in pricing_metadata — QuickBooks has
+  // NO SystemShield items (verified 2026-08-13 after SalesOrderAdd error 3140
+  // killed an entire order that included "SystemShield Level A"). A warranty
+  // line must never reach the QBXML; it becomes a memo note staff act on.
+  const stmtWarranty = db.prepare(`
+    SELECT qb_item_name, csv_price FROM pricing_metadata
+    WHERE category = 'warranty' AND qb_item_name = ? COLLATE NOCASE
+    LIMIT 1
+  `);
+  const stmtInvExists = db.prepare(`
+    SELECT 1 FROM inventory_cache
+    WHERE is_active = 1 AND sales_price IS NOT NULL
+      AND (name = ? COLLATE NOCASE OR full_name = ? COLLATE NOCASE)
+    LIMIT 1
+  `);
 
   for (const item of items || []) {
     const name = item && item.name;
     if (!name) continue;
+
+    // Warranty intercept — BEFORE tier 1, because pricing_metadata makes
+    // isCatalogValid() pass these names even though QB can't book them.
+    const wty = stmtWarranty.get(name);
+    if (wty && !stmtInvExists.get(name, name)) {
+      const rate = (item.rate != null && item.rate > 0) ? item.rate : wty.csv_price;
+      warrantyNoted.push({
+        name: wty.qb_item_name,
+        qty: Number(item.qty) || 1,
+        price: rate,
+      });
+      continue;
+    }
 
     if (isCatalogValid(name)) {
       valid.push(item);
@@ -167,8 +196,11 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
     }
   }
 
-  // 400 path: nothing salvageable on any tier.
+  // 400 path: nothing salvageable on any tier. (Warranty-only orders also
+  // land here — QB has no warranty items to book, so there is no order to
+  // create; the message tells Sophia warranties ride along with equipment.)
   if (valid.length === 0 && lookupGated.length === 0 && autoMatched.length === 0) {
+    const warrantyOnly = warrantyNoted.length > 0;
     return {
       reject: true,
       rejectStatus: 400,
@@ -178,17 +210,22 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
       staffFollowupNotes,
       rejectPayload: {
         error: 'Invalid items',
-        message:
-          'No line items matched a known QuickBooks product, none had lookup_part ' +
-          'evidence for this call, and none could be resolved via fuzzy catalog ' +
-          'lookup. Use the lookup_part tool for each material, or move them all ' +
-          'to staff_followup_notes.',
+        message: warrantyOnly
+          ? 'SystemShield warranties cannot be booked as standalone QuickBooks ' +
+            'line items — they are recorded as an order note alongside equipment. ' +
+            'Resubmit the order WITH the equipment items[] and keep the warranty ' +
+            'item in the list; it will be noted on the ticket automatically.'
+          : 'No line items matched a known QuickBooks product, none had lookup_part ' +
+            'evidence for this call, and none could be resolved via fuzzy catalog ' +
+            'lookup. Use the lookup_part tool for each material, or move them all ' +
+            'to staff_followup_notes.',
         invalid_items: invalidNames,
         suggestions,
       },
       logDetail: {
-        reason: 'no_valid_items_after_all_tiers',
+        reason: warrantyOnly ? 'warranty_only_order' : 'no_valid_items_after_all_tiers',
         invalid: invalidNames,
+        warranty_noted: warrantyNoted.map((w) => w.name),
         suggestions,
         call_id,
       },
@@ -242,10 +279,12 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
   }));
   const itemsForOrder = [...valid, ...lookupGated, ...matchedAsLineItems];
 
-  // Build audit-line + followup-line memo segments.
+  // Build audit-line + followup-line + warranty memo segments.
   const auditLines = autoMatched.map((m) => m.audit_line);
   const followupLines = stillUnmatched.map(formatFollowupLine);
-  const allNoteSegments = [...auditLines, ...followupLines].filter(Boolean);
+  const warrantyLines = warrantyNoted.map((w) =>
+    `WARRANTY SOLD: ${w.qty}x ${w.name} @ $${w.price} (not a QB item - bill per warranty process)`);
+  const allNoteSegments = [...warrantyLines, ...auditLines, ...followupLines].filter(Boolean);
   if (allNoteSegments.length > 0) {
     const joined = allNoteSegments.join('; ');
     staffFollowupNotes = staffFollowupNotes
@@ -254,7 +293,8 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
   }
 
   // Did this submission depend on any tier other than tier-1 catalog?
-  const wasGated = lookupGated.length > 0 || autoMatched.length > 0 || stillUnmatched.length > 0;
+  const wasGated = lookupGated.length > 0 || autoMatched.length > 0 ||
+    stillUnmatched.length > 0 || warrantyNoted.length > 0;
 
   return {
     reject: false,
@@ -266,12 +306,14 @@ function rescueAndPartitionItems(items, existingFollowupNotes, opts = {}) {
     })),
     lookupGatedItems: lookupGated.map((i) => i.name),
     autoFollowupItems: stillUnmatched.map((i) => i.name),
+    warrantyNotedItems: warrantyNoted,
     staffFollowupNotes,
     logDetail: wasGated ? {
       catalog_direct_count: valid.length,
       lookup_gated_count: lookupGated.length,
       auto_matched_count: autoMatched.length,
       promoted_to_followup: stillUnmatched.map((i) => i.name),
+      warranty_noted: warrantyNoted.map((w) => w.name),
       suggestions,
       call_id,
     } : null,
@@ -302,6 +344,7 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
   const autoFollowupItems = rescue.autoFollowupItems;
   const autoMatchedItems = rescue.autoMatchedItems;
   const lookupGatedItems = rescue.lookupGatedItems || [];
+  const warrantyNotedItems = rescue.warrantyNotedItems || [];
   staff_followup_notes = rescue.staffFollowupNotes;
   if (rescue.logDetail) {
     log.logEvent({
@@ -415,6 +458,10 @@ router.post('/order', validate(validateOrderPayload), (req, res) => {
     response.lookup_gated_items = lookupGatedItems;
   }
 
+  if (warrantyNotedItems.length > 0) {
+    response.warranty_noted_items = warrantyNotedItems;
+  }
+
   res.status(202).json(response);
 });
 
@@ -442,6 +489,7 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
   const autoFollowupItems = rescue.autoFollowupItems;
   const autoMatchedItems = rescue.autoMatchedItems;
   const lookupGatedItems = rescue.lookupGatedItems || [];
+  const warrantyNotedItems = rescue.warrantyNotedItems || [];
   staff_followup_notes = rescue.staffFollowupNotes;
   if (rescue.logDetail) {
     log.logEvent({
@@ -549,6 +597,10 @@ router.post('/invoice', validate(validateOrderPayload), (req, res) => {
 
   if (lookupGatedItems.length > 0) {
     invoiceResponse.lookup_gated_items = lookupGatedItems;
+  }
+
+  if (warrantyNotedItems.length > 0) {
+    invoiceResponse.warranty_noted_items = warrantyNotedItems;
   }
 
   res.status(202).json(invoiceResponse);

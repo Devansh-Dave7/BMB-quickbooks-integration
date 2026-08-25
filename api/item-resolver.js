@@ -75,6 +75,47 @@ function canonicalizeItemName(name) {
 }
 
 /**
+ * Structural fallback for split-system names Sophia rewrites. On 2026-08-24
+ * (call_af9ab582, Coastal Comfort) the pricing tool returned
+ * "3T 15.2 S2 HP Btr-7AH1AE36PX" and she submitted
+ * "3T 14.3 S2 HP Gd-7AH1AC36PX" — a Good/PSC tier that doesn't exist for 3T.
+ * Tier-substitution alone can't fix that (SEER and indoor family differ).
+ *
+ * Parse the name for tonnage, system type (HP/AC), indoor size (the two
+ * digits in 7AH1A?NNPX) and tier hint, then pick the pricing_metadata row
+ * for that tonnage+type whose indoor_model has the same size. Same tier
+ * wins if it exists; otherwise Btr (BMB's "Standard" for 3T+), then Bst.
+ * Returns the canonical qb_item_name or null when nothing structural
+ * matches (never guesses across tonnage or indoor size).
+ */
+function resolveSystemNameStructurally(name) {
+  if (!name || typeof name !== 'string') return null;
+  const m = name.match(/^(\d+(?:\.\d+)?)T.*?(HP|AC).*?(Gd|Btr|Bst|Std|Good|Better|Best|Standard)-7AH1A[A-Z](\d{2})PX/i);
+  if (!m) return null;
+  const tonnage = parseFloat(m[1]);
+  const category = m[2].toUpperCase() === 'HP' ? 'heat_pump' : 'ac';
+  const tierWord = m[3].toLowerCase();
+  const tierPref = tierWord.startsWith('g') ? 'Good'
+    : tierWord.startsWith('bs') || tierWord === 'best' ? 'Best'
+    : 'Better'; // Btr / Std / Standard / Better
+  const indoorSize = m[4];
+
+  const rows = getDb().prepare(`
+    SELECT qb_item_name, tier, indoor_model FROM pricing_metadata
+    WHERE category = ? AND tonnage = ?
+  `).all(category, tonnage);
+  const sameSize = rows.filter((r) => {
+    const im = String(r.indoor_model || '').match(/7AH1A[A-Z](\d{2})PX/i);
+    return im && im[1] === indoorSize;
+  });
+  if (sameSize.length === 0) return null;
+
+  const byTier = (t) => sameSize.find((r) => String(r.tier || '').toLowerCase().startsWith(t.toLowerCase()));
+  const pick = byTier(tierPref) || byTier('Better') || byTier('Best') || byTier('Good') || sameSize[0];
+  return pick ? pick.qb_item_name : null;
+}
+
+/**
  * Look up a pricing_metadata row by its qb_item_name, then resolve
  * outdoor_model / indoor_model against inventory_cache for full_name + price.
  */
@@ -91,6 +132,10 @@ function resolveItem(itemName, priceLevel = null) {
   for (const candidate of canonicalizeItemName(itemName)) {
     pm = stmt.get(candidate);
     if (pm) break;
+  }
+  if (!pm) {
+    const structural = resolveSystemNameStructurally(itemName);
+    if (structural) pm = stmt.get(structural);
   }
 
   if (!pm) return null;
@@ -263,6 +308,7 @@ function isCatalogValid(name) {
   for (const candidate of canonicalizeItemName(name)) {
     if (stmtPm.get(candidate)) return true;
   }
+  if (resolveSystemNameStructurally(name)) return true;
   // Require sales_price IS NOT NULL — exclude parent-category folder rows
   // like "Tape" / "Saddle Taps" which QB syncs as null-priced inventory
   // headers. Without this guard Sophia could fabricate "Tape" as a
@@ -410,4 +456,5 @@ module.exports = {
   attemptAutoMatch,
   normalizeFabricatedName,
   canonicalizeItemName,
+  resolveSystemNameStructurally,
 };

@@ -329,3 +329,54 @@ describe('isCatalogValid — folder-row guard 2026-06-02', () => {
     assert.equal(isCatalogValid('Drain Pans&Accessories:SS3'), true);
   });
 });
+
+describe('resolveSystemNameStructurally — rewritten tier/indoor family 2026-08-24', () => {
+  const { resolveSystemNameStructurally, resolveItem, isCatalogValid } = require('../api/item-resolver');
+  before(() => setupTestDb());
+  after(() => teardownTestDb());
+  beforeEach(() => {
+    clearAllTables();
+    const db = require('../db/schema').getDb();
+    const ins = db.prepare(`INSERT INTO pricing_metadata
+      (category, qb_item_name, tonnage, seer2, tier, outdoor_model, indoor_model)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    ins.run('heat_pump', '3T 15.2 S2 HP Btr-7AH1AE36PX', 3, 15.2, 'Better', '7HP14F36P', '7AH1AE36PX-71');
+    ins.run('heat_pump', '3T 15.2 S2 HP Bst-7AH1AV36PX', 3, 15.2, 'Best', '7HP14F36P', '7AH1AV36PX-71');
+    ins.run('heat_pump', '3T 14.7 S2 HP Btr-7AH1AE42PX', 3, 14.7, 'Better', '7HP14F36P', '7AH1AE42PX-71');
+    ins.run('heat_pump', '2T 14.3 S2 HP Gd-7AH1AC24PX', 2, 14.3, 'Good', '7HP14F24P', '7AH1AC24PX-71');
+    cache.upsertInventoryItem({ listId: 'O36', name: '7HP14F36P', fullName: 'Allied Res:Split HP:7HP14F36P', salesPrice: 2500, isActive: true });
+    cache.upsertInventoryItem({ listId: 'I36', name: '7AH1AE36PX-71', fullName: "Allied Res:A/H's:7AH1AE36PX-71", salesPrice: 1428, isActive: true });
+  });
+
+  it('nonexistent 3T Good/PSC name -> Btr of the same indoor size', () => {
+    assert.equal(resolveSystemNameStructurally('3T 14.3 S2 HP Gd-7AH1AC36PX'),
+      '3T 15.2 S2 HP Btr-7AH1AE36PX');
+  });
+
+  it('respects indoor size — 42 does not resolve to the 36 row', () => {
+    assert.equal(resolveSystemNameStructurally('3T 14.3 S2 HP Gd-7AH1AC42PX'),
+      '3T 14.7 S2 HP Btr-7AH1AE42PX');
+  });
+
+  it('never crosses tonnage', () => {
+    assert.equal(resolveSystemNameStructurally('5T 14.3 S2 HP Gd-7AH1AC60PX'), null);
+  });
+
+  it('existing exact name is untouched (2T Good really exists)', () => {
+    assert.equal(resolveSystemNameStructurally('2T 14.3 S2 HP Gd-7AH1AC24PX'),
+      '2T 14.3 S2 HP Gd-7AH1AC24PX');
+  });
+
+  it('isCatalogValid + resolveItem accept the rewritten name and expand real components', () => {
+    assert.equal(isCatalogValid('3T 14.3 S2 HP Gd-7AH1AC36PX'), true);
+    const exp = resolveItem('3T 14.3 S2 HP Gd-7AH1AC36PX');
+    assert.ok(exp && exp.parts.length === 2, 'expected outdoor+indoor expansion');
+    const names = exp.parts.map((p) => p.name).sort();
+    assert.deepEqual(names, ["Allied Res:A/H's:7AH1AE36PX-71", 'Allied Res:Split HP:7HP14F36P']);
+  });
+
+  it('non-system names return null', () => {
+    assert.equal(resolveSystemNameStructurally('Heat Kit-ECB45-7.5-P (SS)'), null);
+    assert.equal(resolveSystemNameStructurally('4 inch silver flex'), null);
+  });
+});
